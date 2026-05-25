@@ -51,6 +51,7 @@ AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 lock = threading.RLock()
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
+is_connecting = False
 
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(exist_ok=True)
@@ -72,6 +73,45 @@ def read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+def cleanup_old_logs(logs_dir: Path) -> None:
+    try:
+        now = time.time()
+        three_days_sec = 3 * 24 * 60 * 60
+        for path in logs_dir.glob("*.json"):
+            match = re.match(r"^(\d{4}-\d{2}-\d{2})\.json$", path.name)
+            if match:
+                date_str = match.group(1)
+                try:
+                    file_time = time.mktime(time.strptime(date_str, "%Y-%m-%d"))
+                    today_str = time.strftime("%Y-%m-%d", time.localtime())
+                    today_time = time.mktime(time.strptime(today_str, "%Y-%m-%d"))
+                    if today_time - file_time >= three_days_sec:
+                        path.unlink()
+                        print(f"[清理] 已删除3天前的旧日志文件: {path.name}", flush=True)
+                except Exception:
+                    if now - path.stat().st_mtime > three_days_sec:
+                        path.unlink()
+    except Exception as e:
+        print(f"[清理错误] 清理旧日志失败: {e}", flush=True)
+
+def log_to_json(level: str, module: str, message: str) -> None:
+    try:
+        logs_dir = DATA_DIR / "logs"
+        logs_dir.mkdir(exist_ok=True, parents=True)
+        date_str = time.strftime("%Y-%m-%d", time.localtime())
+        log_file = logs_dir / f"{date_str}.json"
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "level": level,
+            "module": module,
+            "message": message
+        }
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        cleanup_old_logs(logs_dir)
+    except Exception as e:
+        print(f"[Log Error] Failed to write JSON log: {e}", flush=True)
 
 def set_state(**updates: Any) -> None:
     state = get_state()
@@ -185,6 +225,7 @@ def fetch_candidates() -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen_ips = set()
     
+    log_to_json("INFO", "Main", "开始拉取官方 API 节点列表...")
     for i in range(3):
         if i > 0:
             time.sleep(1.5)
@@ -204,7 +245,9 @@ def fetch_candidates() -> list[dict[str, Any]]:
                 seen_ips.add(ip)
         except Exception as e:
             print(f"[fetch_candidates] Fetch {i+1} failed: {e}", flush=True)
+            log_to_json("WARNING", "Main", f"第 {i+1} 次拉取 API 节点失败: {e}")
             if i == 0 and not candidates:
+                log_to_json("ERROR", "Main", f"获取官方 API 节点失败: {e}")
                 raise
                 
     set_state(
@@ -213,6 +256,7 @@ def fetch_candidates() -> list[dict[str, Any]]:
         last_fetch_message=f"Fetched {len(candidates)} unique candidates across multiple attempts.",
         blacklisted_nodes=len(blacklist),
     )
+    log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")
     return candidates
 
 def cached_nodes() -> list[dict[str, Any]]:
@@ -510,9 +554,46 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         else:
             return {}
 
-def connect_node(node_id: str) -> str:
-    global active_openvpn_process, active_openvpn_node_id
+def auto_switch_node() -> None:
+    # Find the next best available node that is not blacklisted
     with lock:
+        nodes = read_json(NODES_FILE, [])
+        blacklist = load_blacklist()
+        candidates = [
+            n for n in nodes 
+            if n.get("probe_status") == "available" 
+            and not n.get("active") 
+            and n["id"] not in blacklist
+        ]
+        candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
+        
+    if candidates:
+        next_node = candidates[0]
+        msg = f"当前连接已失效或代理连通性检测失败，正在自动切换至最佳备用节点: {next_node['id']}"
+        print(f"[自动切换] {msg}", flush=True)
+        log_to_json("INFO", "VPN", msg)
+        try:
+            connect_node(next_node["id"])
+        except Exception as e:
+            err_msg = f"切换到备用节点 {next_node['id']} 失败: {e}，将尝试下一个..."
+            print(f"[自动切换] {err_msg}", flush=True)
+            log_to_json("WARNING", "VPN", err_msg)
+            auto_switch_node()
+    else:
+        msg = "没有可用的备选节点，请等待后台检测补齐新节点"
+        print(f"[自动切换] {msg}", flush=True)
+        log_to_json("WARNING", "VPN", msg)
+
+def connect_node(node_id: str) -> str:
+    global active_openvpn_process, active_openvpn_node_id, is_connecting
+    with lock:
+        if is_connecting:
+            print("[连接] 正在建立其他连接中，跳过此请求", flush=True)
+            return "Already connecting"
+        is_connecting = True
+        
+    try:
+        log_to_json("INFO", "VPN", f"开始连接节点: {node_id}")
         nodes = read_json(NODES_FILE, [])
         node = next((item for item in nodes if item.get("id") == node_id), None)
         if not node:
@@ -539,6 +620,7 @@ def connect_node(node_id: str) -> str:
             for item in nodes:
                 item["active"] = False
             write_json(NODES_FILE, nodes)
+            log_to_json("ERROR", "VPN", f"连接节点 {node_id} 失败: {message}")
             raise RuntimeError(message)
             
         active_openvpn_process = process
@@ -550,7 +632,11 @@ def connect_node(node_id: str) -> str:
                 item["probe_message"] = f"Active node. HTTP proxy: http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}"
         write_json(NODES_FILE, nodes)
         set_state(active_openvpn_node_id=node_id, last_check_message=f"Connected {node_id}")
+        log_to_json("INFO", "VPN", f"节点 {node_id} 连接成功，出口网卡 tun0 已启用")
         return f"Connected {node_id}"
+    finally:
+        with lock:
+            is_connecting = False
 
 def maintain_valid_nodes(force: bool = False) -> str:
     global active_openvpn_process, active_openvpn_node_id
@@ -560,8 +646,14 @@ def maintain_valid_nodes(force: bool = False) -> str:
         with lock:
             stop_active_openvpn()
     elif not active_openvpn_running():
+        has_active_id = False
         with lock:
+            if active_openvpn_node_id:
+                has_active_id = True
             stop_active_openvpn()
+        if has_active_id:
+            print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
+            auto_switch_node()
 
     try:
         candidates = fetch_candidates()
@@ -574,6 +666,16 @@ def maintain_valid_nodes(force: bool = False) -> str:
             candidates = []
 
     with lock:
+        # Write config files to local folder for all candidates
+        CONFIG_DIR.mkdir(exist_ok=True, parents=True)
+        for cand in candidates:
+            config_path = Path(cand["config_file"])
+            if not config_path.exists():
+                try:
+                    config_path.write_text(cand["config_text"], encoding="utf-8")
+                except Exception:
+                    pass
+
         cached = read_json(NODES_FILE, [])
         cached_by_id = {n["id"]: n for n in cached}
 
@@ -1922,6 +2024,10 @@ def background_proxy_checker() -> None:
     time.sleep(2)
     while True:
         try:
+            if is_connecting:
+                time.sleep(5)
+                continue
+
             res = check_proxy_health()
             if res["ok"]:
                 set_state(
@@ -1930,6 +2036,7 @@ def background_proxy_checker() -> None:
                     proxy_latency_ms=res["latency_ms"],
                     proxy_error=""
                 )
+                log_to_json("INFO", "Proxy", f"代理可用，IP: {res['ip']}, 延迟: {res['latency_ms']} ms")
             else:
                 error_msg = res.get("error", "未知错误")
                 print(f"[警告] 7928 端口本地代理当前不可用！原因: {error_msg}", flush=True)
@@ -1939,8 +2046,22 @@ def background_proxy_checker() -> None:
                     proxy_latency_ms=0,
                     proxy_error=error_msg
                 )
+                log_to_json("WARNING", "Proxy", f"代理不可用: {error_msg}")
+
+                # If we intended to have an active VPN node but proxy failed, trigger auto-switch
+                if active_openvpn_node_id:
+                    with lock:
+                        nodes = read_json(NODES_FILE, [])
+                        active_node = next((n for n in nodes if n.get("id") == active_openvpn_node_id), None)
+                        if active_node:
+                            mark_blacklisted(active_node, f"代理连通性检测失败: {error_msg}")
+                            active_node["probe_status"] = "unavailable"
+                            write_json(NODES_FILE, nodes)
+                    
+                    auto_switch_node()
         except Exception as e:
             print(f"[错误] 代理后台检测发生异常: {e}", flush=True)
+            log_to_json("ERROR", "Proxy", f"检测守护线程发生异常: {e}")
         time.sleep(30)
 
 class Handler(BaseHTTPRequestHandler):
