@@ -30,17 +30,15 @@ echo -e "${BLUE}==========================================================${PLAI
 echo -e "${BLUE}        欢迎使用 AimiliVPN 一键源码部署与管理脚本${PLAIN}"
 echo -e "${BLUE}==========================================================${PLAIN}"
 
-# 3. Retrieve GitHub Username
-DEFAULT_USER="Hmily"
-if [ -t 0 ]; then
-    echo -e "${YELLOW}提示: 请输入您的 GitHub 用户名，以便拉取对应的开源代码仓。${PLAIN}"
-    read -r -p "请输入 GitHub 用户名 [默认: ${DEFAULT_USER}]: " input_user
-    GITHUB_USER="${input_user:-${DEFAULT_USER}}"
-else
-    GITHUB_USER="${1:-${DEFAULT_USER}}"
-fi
+# 3. Configure GitHub Repository URL
+# Default to the official repository (baoweise-bot/aimili-vpngate)
+DEFAULT_USER="baoweise-bot"
+DEFAULT_REPO="aimili-vpngate"
 
-GITHUB_REPO="AimiliVPN"
+# Allow custom repository override via command line arguments
+GITHUB_USER="${1:-${DEFAULT_USER}}"
+GITHUB_REPO="${2:-${DEFAULT_REPO}}"
+
 GITHUB_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git"
 
 echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖 (openvpn, curl, git, iptables...)${PLAIN}"
