@@ -2,8 +2,7 @@ import paramiko
 import sys
 import os
 
-def deploy(host, port, username, password, local_path, remote_path):
-    # Establish SSH client
+def deploy(host, port, username, password, files_to_upload):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -12,23 +11,28 @@ def deploy(host, port, username, password, local_path, remote_path):
         print("Connected successfully!")
 
         # SFTP transfer
-        print(f"Uploading {local_path} to {remote_path}...")
         sftp = ssh.open_sftp()
-        sftp.put(local_path, remote_path)
+        for local_path, remote_path in files_to_upload:
+            print(f"Uploading {local_path} to {remote_path} (with CRLF->LF conversion)...")
+            with open(local_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            content_lf = content.replace('\r\n', '\n')
+            with sftp.open(remote_path, 'wb') as remote_file:
+                remote_file.write(content_lf.encode('utf-8'))
         sftp.close()
-        print("Upload complete!")
+        print("Uploads complete!")
 
-        # Run post-deployment commands using systemctl
+        # Run installation / upgrade commands
         commands = [
-            "systemctl stop aimilivpn || echo 'Failed to stop aimilivpn'",
-            "pkill -f vpngate_manager.py || echo 'vpngate_manager.py was not running'",
-            "pkill -f openvpn || echo 'openvpn was not running'",
+            "systemctl stop aimilivpn || true",
+            "pkill -f openvpn || true",
             "ip rule del table 100 2>/dev/null || true",
             "ip route flush table 100 2>/dev/null || true",
-            "systemctl start aimilivpn || echo 'Failed to start aimilivpn'",
+            "cd /opt/aimilivpn && bash install.sh baoweise-bot aimili-vpngate",
             "sleep 3",
             "systemctl status aimilivpn",
-            "ps aux | grep vpngate_manager.py"
+            "ls -la /usr/bin/ml",
+            "ml status"
         ]
         
         for cmd in commands:
@@ -56,6 +60,8 @@ if __name__ == "__main__":
         22, 
         "root", 
         "9Qet0EcR6P4h1n8LPg", 
-        r"c:\Users\Hmily\Desktop\AimiliVPN-OpenSource\vpngate_manager.py", 
-        "/opt/aimilivpn/vpngate_manager.py"
+        [
+            (r"c:\Users\Hmily\Desktop\AimiliVPN-OpenSource\vpngate_manager.py", "/opt/aimilivpn/vpngate_manager.py"),
+            (r"c:\Users\Hmily\Desktop\AimiliVPN-OpenSource\install.sh", "/opt/aimilivpn/install.sh")
+        ]
     )

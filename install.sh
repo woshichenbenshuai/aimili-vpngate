@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 export DEBIAN_FRONTEND=noninteractive
 
 RED='\033[0;31m'
@@ -92,80 +92,246 @@ systemctl enable aimilivpn.service
 # 6. Configure global command shortcut "ml"
 echo -e "\n${YELLOW}[4/4] 正在创建全局命令快捷接口 'ml'...${PLAIN}"
 cat > /usr/bin/ml <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+import sys
+import os
+import socket
+import subprocess
+import time
+import tty
+import termios
 
-INSTALL_DIR="/opt/aimilivpn"
+INSTALL_DIR = "/opt/aimilivpn"
+LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
 
-show_help() {
-    echo "使用说明:"
-    echo "  ml start      - 启动服务"
-    echo "  ml stop       - 停止服务"
-    echo "  ml restart    - 重启服务"
-    echo "  ml logs       - 查看实时服务运行日志"
-    echo "  ml status     - 查看运行状态"
-    echo "  ml update     - 一键更新源码及重启服务"
-    echo "  ml uninstall  - 卸载服务及清除源码文件"
-}
+def check_port_listening(port=7928):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.2)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.close()
+        return True
+    except Exception:
+        return False
 
-if [[ "$(id -u)" != "0" ]]; then
-    echo "错误: 必须以 root 权限运行此命令。"
-    exit 1
-fi
+def check_service_active(service_name="aimilivpn.service"):
+    try:
+        res = subprocess.run(["systemctl", "is-active", service_name], capture_output=True, text=True, timeout=2)
+        return res.stdout.strip() == "active"
+    except Exception:
+        return False
 
-case "${1:-}" in
-    start)
-        systemctl start aimilivpn.service
-        echo "AimiliVPN 服务已启动。"
-        ;;
-    stop)
-        systemctl stop aimilivpn.service
-        echo "AimiliVPN 服务已停止。"
-        ;;
-    restart)
-        systemctl restart aimilivpn.service
-        echo "AimiliVPN 服务已重启。"
-        ;;
-    status)
-        systemctl status aimilivpn.service || true
-        ;;
-    logs)
-        echo "正在查看 AimiliVPN 日志 (按 Ctrl+C 退出)..."
-        journalctl -u aimilivpn.service -f -n 50
-        ;;
-    update)
-        echo "正在一键更新 AimiliVPN 至最新版本并清理旧代码..."
-        cd "${INSTALL_DIR}"
-        git fetch --all
-        BRANCH=$(git symbolic-ref --short -q HEAD || echo "main")
-        if git reset --hard "origin/${BRANCH}"; then
-            echo "代码拉取成功，正在执行升级配置..."
-            if bash "${INSTALL_DIR}/install.sh"; then
-                echo "AimiliVPN 一键更新与清理完成！"
-            else
-                echo "错误: 升级配置执行失败。"
-                exit 1
-            fi
-        else
-            echo "错误: 无法从 GitHub 拉取最新代码，请检查网络。"
-            exit 1
-        fi
-        ;;
-    uninstall)
-        echo "正在完全卸载 AimiliVPN..."
-        systemctl stop aimilivpn.service || true
-        systemctl disable aimilivpn.service || true
-        rm -f /lib/systemd/system/aimilivpn.service
-        rm -f /usr/bin/ml
-        rm -rf "${INSTALL_DIR}"
-        echo "AimiliVPN 卸载完毕！"
-        ;;
-    *)
-        show_help
-        ;;
-esac
+def get_service_pid(service_name="aimilivpn.service"):
+    try:
+        res = subprocess.run(["systemctl", "show", service_name, "--property=MainPID"], capture_output=True, text=True, timeout=2)
+        out = res.stdout.strip()
+        if out.startswith("MainPID="):
+            pid = out.split("=")[1]
+            if pid and pid != "0":
+                return pid
+    except Exception:
+        pass
+    return None
+
+def print_status():
+    gateway_ok = check_port_listening(7928)
+    service_ok = check_service_active("aimilivpn.service")
+    pid = get_service_pid("aimilivpn.service")
+    
+    green = "\033[1;32m"
+    red = "\033[1;31m"
+    reset = "\033[0m"
+    bold = "\033[1m"
+    
+    gateway_status = f"{green}运行中{reset}" if gateway_ok else f"{red}未运行{reset}"
+    if service_ok:
+        pid_info = f" (PID: {pid})" if pid else ""
+        service_status = f"{green}运行中{reset}{pid_info}"
+    else:
+        service_status = f"{red}未运行{reset}"
+        
+    print(f"{bold}Aimili运行状态：{reset}")
+    print(f"  网关7928 - {gateway_status}")
+    print(f"  Aimili   - {service_status}")
+    print()
+
+def start_service():
+    print("正在启动 AimiliVPN 服务...", flush=True)
+    subprocess.run(["systemctl", "start", "aimilivpn.service"])
+    print("已发送启动指令。")
+    time.sleep(1)
+
+def stop_service():
+    print("正在停止 AimiliVPN 服务...", flush=True)
+    subprocess.run(["systemctl", "stop", "aimilivpn.service"])
+    print("已发送停止指令。")
+    time.sleep(1)
+
+def restart_service():
+    print("正在重启 AimiliVPN 服务...", flush=True)
+    subprocess.run(["systemctl", "restart", "aimilivpn.service"])
+    print("已发送重启指令。")
+    time.sleep(1)
+
+def show_logs():
+    print("正在查看 AimiliVPN 日志 (按 Ctrl+C 退出)...", flush=True)
+    if os.path.exists(LOG_FILE):
+        try:
+            subprocess.run(["tail", "-f", "-n", "50", LOG_FILE])
+        except KeyboardInterrupt:
+            pass
+    else:
+        print(f"日志文件不存在: {LOG_FILE}")
+        time.sleep(2)
+
+def update_service():
+    print("正在一键更新 AimiliVPN 至最新版本并清理旧代码...", flush=True)
+    if os.path.exists(INSTALL_DIR):
+        try:
+            os.chdir(INSTALL_DIR)
+            subprocess.run(["git", "fetch", "--all"], check=True)
+            res = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, text=True)
+            branch = res.stdout.strip() or "main"
+            subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], check=True)
+            print("代码拉取成功，正在重新运行安装脚本...", flush=True)
+            subprocess.run(["bash", "install.sh"])
+        except Exception as e:
+            print(f"更新失败: {e}")
+            time.sleep(3)
+    else:
+        print(f"未找到安装目录: {INSTALL_DIR}")
+        time.sleep(2)
+
+def uninstall_service():
+    confirm = input("确定要完全卸载 AimiliVPN 吗？(y/N): ")
+    if confirm.lower() == 'y':
+        print("正在完全卸载 AimiliVPN...", flush=True)
+        subprocess.run(["systemctl", "stop", "aimilivpn.service"])
+        subprocess.run(["systemctl", "disable", "aimilivpn.service"])
+        try:
+            os.unlink("/lib/systemd/system/aimilivpn.service")
+        except Exception:
+            pass
+        try:
+            os.unlink("/usr/bin/ml")
+        except Exception:
+            pass
+        subprocess.run(["rm", "-rf", INSTALL_DIR])
+        print("AimiliVPN 已卸载！")
+        sys.exit(0)
+    else:
+        print("已取消卸载。")
+        time.sleep(1)
+
+def getch():
+    fd = sys.stdin.fileno()
+    try:
+        old_settings = termios.tcgetattr(fd)
+    except termios.error:
+        return sys.stdin.read(1)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ch
+
+def get_key():
+    ch = getch()
+    if ch == '\x1b':
+        ch2 = getch()
+        if ch2 == '[':
+            ch3 = getch()
+            if ch3 == 'A':
+                return 'up'
+            elif ch3 == 'B':
+                return 'down'
+    elif ch == '\r' or ch == '\n':
+        return 'enter'
+    elif ch == '\x03':
+        return 'ctrl+c'
+    return ch
+
+def main():
+    if os.geteuid() != 0:
+        print("错误: 必须以 root 权限运行此命令。")
+        sys.exit(1)
+        
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1].lower()
+        if cmd == "start":
+            start_service()
+        elif cmd == "stop":
+            stop_service()
+        elif cmd == "restart":
+            restart_service()
+        elif cmd == "status":
+            print_status()
+        elif cmd == "logs":
+            show_logs()
+        elif cmd == "update":
+            update_service()
+        elif cmd == "uninstall":
+            uninstall_service()
+        else:
+            print("未知命令。可用命令: start, stop, restart, status, logs, update, uninstall")
+        sys.exit(0)
+        
+    options = [
+        ("启动", start_service),
+        ("停止", stop_service),
+        ("重启", restart_service),
+        ("日志", show_logs),
+        ("更新", update_service),
+        ("卸载", uninstall_service),
+        ("退出", None)
+    ]
+    
+    selected_idx = 0
+    while True:
+        print("\033[H\033[J", end="")
+        print_status()
+        
+        for i, (name, _) in enumerate(options):
+            cmd_hint = ""
+            if name == "启动": cmd_hint = "start"
+            elif name == "停止": cmd_hint = "stop"
+            elif name == "重启": cmd_hint = "restart"
+            elif name == "日志": cmd_hint = "logs"
+            elif name == "更新": cmd_hint = "update"
+            elif name == "卸载": cmd_hint = "uninstall"
+            elif name == "退出": cmd_hint = "exit"
+            
+            if i == selected_idx:
+                print(f" \033[1;32m> ml {cmd_hint:<9} - {name}\033[0m")
+            else:
+                print(f"   ml {cmd_hint:<9} - {name}")
+        print()
+        
+        try:
+            key = get_key()
+        except KeyboardInterrupt:
+            break
+            
+        if key == 'up':
+            selected_idx = (selected_idx - 1) % len(options)
+        elif key == 'down':
+            selected_idx = (selected_idx + 1) % len(options)
+        elif key == 'enter':
+            _, func = options[selected_idx]
+            if func is None:
+                break
+            print("\033[H\033[J", end="")
+            func()
+            if func in (start_service, stop_service, restart_service):
+                continue
+            break
+        elif key == 'ctrl+c' or key == 'q':
+            break
+
+if __name__ == "__main__":
+    main()
 EOF
-
 chmod +x /usr/bin/ml
 
 # 7. Start service

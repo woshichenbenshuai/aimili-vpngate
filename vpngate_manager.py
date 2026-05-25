@@ -26,8 +26,8 @@ import vpn_utils
 import proxy_server
 
 API_URL = "https://www.vpngate.net/api/iphone/"
-FETCH_INTERVAL_SECONDS = int(os.environ.get("FETCH_INTERVAL_SECONDS", "600"))
-CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "600"))
+FETCH_INTERVAL_SECONDS = int(os.environ.get("FETCH_INTERVAL_SECONDS", "960"))
+CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "960"))
 TARGET_VALID_NODES = int(os.environ.get("TARGET_VALID_NODES", "3"))
 MAX_SCAN_ROWS = int(os.environ.get("MAX_SCAN_ROWS", "300"))
 OPENVPN_TEST_TIMEOUT_SECONDS = int(os.environ.get("OPENVPN_TEST_TIMEOUT_SECONDS", "35"))
@@ -45,7 +45,6 @@ DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPN
 CONFIG_DIR = DATA_DIR / "configs"
 NODES_FILE = DATA_DIR / "nodes.json"
 STATE_FILE = DATA_DIR / "state.json"
-BLACKLIST_FILE = DATA_DIR / "invalid_nodes.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 
 lock = threading.RLock()
@@ -128,7 +127,7 @@ def get_state() -> dict[str, Any]:
     state.setdefault("active_openvpn_node_id", active_openvpn_node_id)
     state.setdefault("last_fetch_status", "not_started")
     state.setdefault("last_check_message", "")
-    state.setdefault("blacklisted_nodes", len(load_blacklist()))
+    state.setdefault("blacklisted_nodes", 0)
     return state
 
 def safe_name(value: str) -> str:
@@ -162,26 +161,10 @@ def decode_config(encoded: str) -> str:
     return base64.b64decode(encoded.encode("ascii"), validate=False).decode("utf-8", errors="replace")
 
 def load_blacklist() -> dict[str, dict[str, Any]]:
-    now = time.time()
-    raw = read_json(BLACKLIST_FILE, {})
-    fresh = {
-        str(node_id): item
-        for node_id, item in raw.items()
-        if now - float(item.get("failed_at", 0)) < INVALID_BACKOFF_SECONDS
-    }
-    if fresh != raw:
-        write_json(BLACKLIST_FILE, fresh)
-    return fresh
+    return {}
 
 def mark_blacklisted(node: dict[str, Any], message: str) -> None:
-    with lock:
-        blacklist = load_blacklist()
-        blacklist[str(node["id"])] = {
-            "failed_at": time.time(),
-            "message": message,
-            "remote": f"{node.get('remote_host')}:{node.get('remote_port')}",
-        }
-        write_json(BLACKLIST_FILE, blacklist)
+    pass
 
 def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     ip = row.get("IP", "")
@@ -528,8 +511,6 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
     }
     if ok:
         vpn_utils.enrich_ip_info([temp_node])
-    else:
-        mark_blacklisted(temp_node, message)
 
     with lock:
         nodes = read_json(NODES_FILE, [])
@@ -554,16 +535,98 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         else:
             return {}
 
-def auto_switch_node() -> None:
-    # Find the next best available node that is not blacklisted
+def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
     with lock:
         nodes = read_json(NODES_FILE, [])
-        blacklist = load_blacklist()
+        to_test = [n for n in nodes if n.get("id") in node_ids]
+        
+    def test_worker(n_info: dict[str, Any]) -> dict[str, Any]:
+        node_id = n_info["id"]
+        config_file = n_info["config_file"]
+        config_text = n_info.get("config_text") or ""
+        h = str(n_info.get("remote_host") or n_info.get("ip"))
+        p = parse_int(n_info.get("remote_port"))
+        fallback_ping = parse_int(n_info.get("ping"))
+        
+        temp_path = Path(config_file)
+        try:
+            CONFIG_DIR.mkdir(exist_ok=True, parents=True)
+            temp_path.write_text(config_text, encoding="utf-8")
+        except Exception:
+            pass
+            
+        latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
+        ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev="tun")
+        
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
+            
+        temp_node = {
+            "id": node_id,
+            "latency_ms": latency,
+            "probe_status": "available" if ok else "unavailable",
+            "probe_message": message,
+            "probed_at": time.time(),
+            "owner": "",
+            "asn": "",
+            "as_name": "",
+            "location": "",
+            "ip_type": "",
+            "quality": "",
+        }
+        if ok:
+            ip_to_enrich = {
+                "ip": n_info.get("ip"),
+                "remote_host": h,
+                "owner": "",
+                "asn": "",
+                "as_name": "",
+                "location": "",
+                "ip_type": "",
+                "quality": "",
+            }
+            vpn_utils.enrich_ip_info([ip_to_enrich])
+            temp_node.update(ip_to_enrich)
+        return temp_node
+
+    updated_nodes_map = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(to_test))) as executor:
+        futures = {executor.submit(test_worker, n): n["id"] for n in to_test}
+        for future in concurrent.futures.as_completed(futures):
+            nid = futures[future]
+            try:
+                res = future.result()
+                updated_nodes_map[nid] = res
+            except Exception as e:
+                updated_nodes_map[nid] = {
+                    "id": nid,
+                    "probe_status": "unavailable",
+                    "probe_message": f"Test exception: {e}",
+                    "latency_ms": 0
+                }
+                
+    with lock:
+        current_nodes = read_json(NODES_FILE, [])
+        for n in current_nodes:
+            nid = n.get("id")
+            if nid in updated_nodes_map:
+                n.update(updated_nodes_map[nid])
+        sorted_nodes = sort_all_nodes(current_nodes)
+        write_json(NODES_FILE, sorted_nodes)
+        
+    return list(updated_nodes_map.values())
+
+def auto_switch_node() -> None:
+    # Find the next best available node
+    with lock:
+        nodes = read_json(NODES_FILE, [])
         candidates = [
             n for n in nodes 
             if n.get("probe_status") == "available" 
-            and not n.get("active") 
-            and n["id"] not in blacklist
+            and not n.get("active")
         ]
         candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
         
@@ -632,7 +695,6 @@ def connect_node(node_id: str) -> str:
                 pass
             node["probe_status"] = "unavailable"
             node["probe_message"] = message
-            mark_blacklisted(node, message)
             for item in nodes:
                 item["active"] = False
             write_json(NODES_FILE, nodes)
@@ -658,7 +720,6 @@ def maintain_valid_nodes(force: bool = False) -> str:
     global active_openvpn_process, active_openvpn_node_id
     ensure_dirs()
     if force:
-        write_json(BLACKLIST_FILE, {})
         with lock:
             stop_active_openvpn()
     elif not active_openvpn_running():
@@ -666,7 +727,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
         with lock:
             if active_openvpn_node_id:
                 has_active_id = True
-            stop_active_openvpn()
+                stop_active_openvpn()
         if has_active_id:
             print("[维护线程] 检测到当前 OpenVPN 进程已意外退出，准备自动切换节点", flush=True)
             auto_switch_node()
@@ -681,225 +742,66 @@ def maintain_valid_nodes(force: bool = False) -> str:
             set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=str(exc2))
             candidates = []
 
+    if not candidates:
+        return "没有拉取到新节点"
+
     with lock:
-        # Write config files to local folder for all candidates
-        CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-        for cand in candidates:
-            config_path = Path(cand["config_file"])
-            if not config_path.exists():
-                try:
-                    config_path.write_text(cand["config_text"], encoding="utf-8")
-                except Exception:
-                    pass
-
-        cached = read_json(NODES_FILE, [])
-        cached_by_id = {n["id"]: n for n in cached}
-
+        active_node = None
+        if active_openvpn_node_id:
+            current_nodes = read_json(NODES_FILE, [])
+            active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
+            
         merged: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-
+        
+        if active_node:
+            merged.append(active_node)
+            seen_ids.add(active_node["id"])
+            
         for cand in candidates:
-            node_id = cand["id"]
-            if node_id in seen_ids:
-                continue
-            seen_ids.add(node_id)
-            if node_id in cached_by_id:
-                old = cached_by_id[node_id]
-                old.update({
-                    "score": cand["score"],
-                    "ping": cand["ping"],
-                    "speed": cand["speed"],
-                    "sessions": cand["sessions"],
-                    "config_text": cand["config_text"]
-                })
-                merged.append(old)
-            else:
+            if cand["id"] not in seen_ids:
                 merged.append(cand)
-
-        if active_openvpn_node_id and active_openvpn_node_id not in seen_ids:
-            active_node = cached_by_id.get(active_openvpn_node_id)
-            if active_node:
-                seen_ids.add(active_openvpn_node_id)
-                merged.append(active_node)
-
-        for old in cached:
-            node_id = old["id"]
-            if node_id not in seen_ids:
-                if old.get("config_text"):
-                    seen_ids.add(node_id)
-                    merged.append(old)
-
-        merged = sort_all_nodes(merged)
+                seen_ids.add(cand["id"])
+                
         if len(merged) > 1000:
             merged = merged[:1000]
+            
+        for n in merged:
+            config_path = Path(n["config_file"])
+            if not config_path.exists():
+                try:
+                    config_path.write_text(n["config_text"], encoding="utf-8")
+                except Exception:
+                    pass
+                    
         write_json(NODES_FILE, merged)
 
-        available_nodes = [n for n in merged if n.get("active") or n.get("probe_status") == "available"]
-        num_available = len(available_nodes)
-
-    tested = 0
-    failed = 0
-    newly_added = 0
-
-    if num_available < TARGET_VALID_NODES:
-        blacklist = load_blacklist()
-        with lock:
-            merged = read_json(NODES_FILE, [])
-            to_test = [
-                n for n in merged
-                if n.get("probe_status") == "not_checked" and n["id"] not in blacklist and not n.get("active")
-            ]
-            to_test.sort(key=lambda n: (-parse_int(n.get("score")), parse_int(n.get("ping"))))
-            
-        def test_worker(n_info: dict[str, Any]) -> tuple[str, int, bool, str, dict[str, Any]]:
-            node_id = n_info["id"]
-            config_file = n_info["config_file"]
-            config_text = n_info["config_text"]
-            h = n_info["h"]
-            p = n_info["p"]
-            fallback_ping = n_info["fallback_ping"]
-            
-            temp_path = Path(config_file)
-            try:
-                CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-                temp_path.write_text(config_text, encoding="utf-8")
-            except Exception as e:
-                return node_id, 0, False, f"Failed to write temp config: {e}", {}
-                
-            latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
-            ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=15, dev="tun")
-            
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except Exception:
-                pass
-                
-            temp_node = {
-                "owner": "",
-                "asn": "",
-                "as_name": "",
-                "location": "",
-                "ip_type": "",
-                "quality": "",
-            }
-            if ok:
-                ip_to_enrich = {
-                    "ip": n_info.get("ip"),
-                    "remote_host": h,
-                    "owner": "",
-                    "asn": "",
-                    "as_name": "",
-                    "location": "",
-                    "ip_type": "",
-                    "quality": "",
-                }
-                vpn_utils.enrich_ip_info([ip_to_enrich])
-                temp_node.update(ip_to_enrich)
-            return node_id, latency, ok, message, temp_node
-
-        batch_size = 5
-        for i in range(0, len(to_test), batch_size):
-            with lock:
-                current_nodes = read_json(NODES_FILE, [])
-                num_available = len([n for n in current_nodes if n.get("active") or n.get("probe_status") == "available"])
-            if num_available >= TARGET_VALID_NODES:
-                break
-            
-            batch = to_test[i : i + batch_size]
-            batch_infos = []
-            for n in batch:
-                batch_infos.append({
-                    "id": n["id"],
-                    "config_file": str(n["config_file"]),
-                    "config_text": n.get("config_text") or "",
-                    "h": str(n.get("remote_host") or n.get("ip")),
-                    "p": parse_int(n.get("remote_port")),
-                    "fallback_ping": parse_int(n.get("ping")),
-                    "ip": n.get("ip"),
-                })
-                
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch_infos)) as executor:
-                futures = {executor.submit(test_worker, info): info for info in batch_infos}
-                for future in concurrent.futures.as_completed(futures):
-                    info = futures[future]
-                    try:
-                        node_id, latency, ok, message, temp_node = future.result()
-                    except Exception as exc:
-                        node_id = info["id"]
-                        latency = 0
-                        ok = False
-                        message = f"test error: {exc}"
-                        temp_node = {}
-                    
-                    tested += 1
-                    
-                    with lock:
-                        current_nodes = read_json(NODES_FILE, [])
-                        node_res = next((item for item in current_nodes if item.get("id") == node_id), None)
-                        if node_res:
-                            node_res["latency_ms"] = latency
-                            node_res["probe_status"] = "available" if ok else "unavailable"
-                            node_res["probe_message"] = message
-                            node_res["probed_at"] = time.time()
-                            if ok:
-                                node_res.update(temp_node)
-                                num_available += 1
-                                newly_added += 1
-                            else:
-                                mark_blacklisted(node_res, message)
-                                failed += 1
-                            
-                            sorted_nodes = sort_all_nodes(current_nodes)
-                            write_json(NODES_FILE, sorted_nodes)
-
+    # Test the first 10 non-active nodes from the new list
+    with lock:
+        current_nodes = read_json(NODES_FILE, [])
+        to_test = [n for n in current_nodes if not n.get("active")][:10]
+        to_test_ids = [n["id"] for n in to_test]
+        
+    print(f"[维护线程] 正在检测新获取列表的前 10 个节点: {to_test_ids}", flush=True)
+    test_multiple_nodes(to_test_ids)
+    
     with lock:
         merged = read_json(NODES_FILE, [])
         if not active_openvpn_running():
             available_candidates = [n for n in merged if n.get("probe_status") == "available"]
             if available_candidates:
-                best_node = available_candidates[0]
-                config_path = Path(best_node["config_file"])
-                try:
-                    CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-                    config_path.write_text(best_node.get("config_text") or "", encoding="utf-8")
-                except Exception as e:
-                    print(f"[auto_connect] Failed to write connection config: {e}", flush=True)
-                else:
-                    ok, message, process = run_openvpn_until_ready(str(best_node["config_file"]), keep_alive=True, route_nopull=True)
-                    if ok and process is not None:
-                        active_openvpn_process = process
-                        active_openvpn_node_id = best_node["id"]
-                        best_node["active"] = True
-                        best_node["probe_message"] = f"Active node. HTTP proxy: http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}"
-                        setup_policy_routing("tun0")
-                    else:
-                        try:
-                            if config_path.exists():
-                                config_path.unlink()
-                        except Exception:
-                            pass
-                        mark_blacklisted(best_node, message)
-                        best_node["probe_status"] = "unavailable"
-                        best_node["probe_message"] = message
-                merged = sort_all_nodes(merged)
-                write_json(NODES_FILE, merged)
+                auto_switch_node()
 
-        valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
-
-    message = (
-        f"Parsed {len(merged)} nodes; baseline {valid_nodes_count}/{TARGET_VALID_NODES} available; "
-        f"tested {tested} in background (new available: {newly_added}, failed: {failed}); "
-        f"active: {active_openvpn_node_id or 'none'}."
-    )
+    valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
+    message = f"Fetched {len(candidates)} nodes. Tested first 10 nodes."
     set_state(
         last_check_at=time.time(),
         last_check_message=message,
         active_openvpn_node_id=active_openvpn_node_id,
         valid_nodes=valid_nodes_count,
-        blacklisted_nodes=len(load_blacklist()),
     )
     return message
+
 
 def collector_loop() -> None:
     while True:
@@ -1069,6 +971,65 @@ INDEX_HTML = r"""<!doctype html>
       margin: 0 auto;
     }
 
+    .active-card {
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(79, 70, 229, 0.04) 100%);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-radius: 16px;
+      padding: 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 24px;
+      box-shadow: 0 8px 32px rgba(99, 102, 241, 0.12);
+      transition: all 0.3s ease;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    
+    .active-card-info {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    
+    .active-card-details {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    
+    .active-card-title {
+      font-size: 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #a5b4fc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .active-card-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    
+    .active-card-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      flex-wrap: wrap;
+    }
+
+    .active-card-meta span strong {
+      color: var(--text-primary);
+    }
+
     .stats {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1138,7 +1099,6 @@ INDEX_HTML = r"""<!doctype html>
 
     .stat:nth-child(2) .stat-icon { color: var(--warning); }
     .stat:nth-child(3) .stat-icon { color: var(--success); }
-    .stat:nth-child(4) .stat-icon { color: var(--danger); }
 
     .ad-section {
       background: var(--bg-surface);
@@ -1285,6 +1245,7 @@ INDEX_HTML = r"""<!doctype html>
       display: flex;
       gap: 16px;
       flex-wrap: wrap;
+      align-items: center;
     }
 
     .toolbar select {
@@ -1446,13 +1407,20 @@ INDEX_HTML = r"""<!doctype html>
       height: 30px;
       font-size: 12px;
       font-weight: 600;
+      transition: all 0.2s ease;
+      cursor: pointer;
     }
 
-    .connect-btn:hover {
+    .connect-btn:hover:not(:disabled) {
       background: var(--primary-gradient);
       color: white;
       border-color: transparent;
       box-shadow: 0 4px 10px rgba(99, 102, 241, 0.3);
+    }
+
+    .connect-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
     }
 
     .test-btn {
@@ -1468,7 +1436,7 @@ INDEX_HTML = r"""<!doctype html>
       transition: all 0.2s ease;
     }
 
-    .test-btn:hover {
+    .test-btn:hover:not(:disabled) {
       background: var(--success-gradient);
       color: white;
       border-color: transparent;
@@ -1524,6 +1492,14 @@ INDEX_HTML = r"""<!doctype html>
       main {
         padding: 16px 20px;
       }
+      .active-card {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      .active-card button {
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -1537,10 +1513,6 @@ INDEX_HTML = r"""<!doctype html>
     <div id="status" class="status"><span class="status-dot"></span>服务加载中...</div>
   </div>
   <div class="btn-group">
-    <button id="clear_bad" class="btn-danger">
-      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-      清空黑名单
-    </button>
     <button id="refresh" class="btn-primary" style="background: var(--success-gradient);">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
       更新节点
@@ -1580,6 +1552,11 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </section>
 
+  <!-- 当前连接活动节点卡片 -->
+  <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
+    <!-- Rendered dynamically by render() -->
+  </section>
+
   <section class="stats">
     <div class="stat">
       <div class="stat-info">
@@ -1608,15 +1585,6 @@ INDEX_HTML = r"""<!doctype html>
         <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
       </div>
     </div>
-    <div class="stat">
-      <div class="stat-info">
-        <strong id="bad">0</strong>
-        <span>黑名单节点</span>
-      </div>
-      <div class="stat-icon-wrapper">
-        <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
-      </div>
-    </div>
   </section>
 
   <section class="proxy-test-section" style="margin-bottom: 24px;">
@@ -1628,7 +1596,7 @@ INDEX_HTML = r"""<!doctype html>
         <div>
           <h3 style="margin: 0 0 4px 0; font-size: 16px; font-weight: 600; color: var(--text-primary);">本地代理出口检测 (Port 7928)</h3>
           <p style="margin: 0; font-size: 13px; color: var(--text-secondary);">
-            测试本地 HTTP/SOCKS5 代理是否成功通过当前 VPN 节点出站，并获取代理的实际出口公网 IP 和延迟。
+            测试本地 HTTP/SOCKS5 代理是否成功通过当前 VPN 节点出站，并获取实际出口公网 IP 和延迟。
           </p>
         </div>
       </div>
@@ -1655,14 +1623,18 @@ INDEX_HTML = r"""<!doctype html>
       <option value="">所有国家</option>
     </select>
     <input id="search" placeholder="输入国家、位置、IP、ASN、运营主体等过滤节点..." />
+    <button id="btn_batch_test" class="btn-primary" style="height: 42px; padding: 0 20px; font-weight: 600; background: var(--primary-gradient);">
+      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+      批量测试本页
+    </button>
   </section>
   <div class="table-wrapper">
     <div class="table-container">
       <table>
         <thead>
           <tr>
-            <th style="width: 110px;">连接状态</th>
-            <th style="width: 100px;">Ping 延迟</th>
+            <th style="width: 110px;">状态</th>
+            <th style="width: 100px;">延迟</th>
             <th style="width: 220px;">IP 地址 : 端口</th>
             <th>物理位置</th>
             <th style="width: 100px;">ASN</th>
@@ -1675,12 +1647,33 @@ INDEX_HTML = r"""<!doctype html>
         <tbody id="rows"></tbody>
       </table>
     </div>
+    
+    <!-- 分页控制栏 -->
+    <div class="pagination-container" style="padding: 16px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border-color); flex-wrap: wrap; gap: 12px;">
+      <div style="font-size: 13px; color: var(--text-secondary);">
+        显示第 <span id="page_start" style="color: var(--text-primary); font-weight:600;">0</span> - <span id="page_end" style="color: var(--text-primary); font-weight:600;">0</span> 条，共 <span id="filtered_count" style="color: var(--text-primary); font-weight:600;">0</span> 条备选节点
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button id="btn_first_page" class="connect-btn" style="height: 32px; padding: 0 10px;">首页</button>
+        <button id="btn_prev_page" class="connect-btn" style="height: 32px; padding: 0 10px;">上一页</button>
+        <span style="font-size: 13px; color: var(--text-secondary); margin: 0 8px;">
+          页码 <strong id="current_page_val" style="color: var(--primary);">1</strong> / <strong id="total_pages_val">1</strong>
+        </span>
+        <button id="btn_next_page" class="connect-btn" style="height: 32px; padding: 0 10px;">下一页</button>
+        <button id="btn_last_page" class="connect-btn" style="height: 32px; padding: 0 10px;">尾页</button>
+      </div>
+    </div>
   </div>
 </main>
 <script>
 let nodes=[], state={}, testingNodeIds = new Set();
+let currentPage = 1;
+const pageSize = 10;
+let batchCountdown = 0;
+let batchInterval = null;
+
 const $=id=>document.getElementById(id);
-const esc=s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#039;"}[c]));
+const esc=s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 const base=p=>(p||"").split(/[\\/]/).pop();
 function time(ts){return ts?new Date(ts*1000).toLocaleString():"从未"}
 function speed(v){return v?`${(v*8/1000/1000).toFixed(1)} Mbps`:"-"}
@@ -1754,7 +1747,7 @@ const translateCountry = c => {
     "Portugal": "葡萄牙",
     "Greece": "希腊",
     "Czech Republic": "捷克",
-    "Hungary": "匈羊利",
+    "Hungary": "匈牙利",
     "Israel": "以色列",
     "United Arab Emirates": "阿联酋",
     "UAE": "阿联酋",
@@ -1802,7 +1795,69 @@ function render(){
   const q=$("search").value.toLowerCase();
   const selectedCountry = $("country_filter").value;
   
+  // Find the active node
+  const activeNodeId = state.active_openvpn_node_id;
+  const activeNode = nodes.find(n => n.active || n.id === activeNodeId);
+  
+  // Render separated Active Node Card
+  const activeCardContainer = $("active_node_card");
+  if (activeNode) {
+    const latencyClass = getLatencyClass(activeNode.latency_ms);
+    const latencyText = activeNode.latency_ms ? `<span class="latency-val ${latencyClass}">${activeNode.latency_ms} ms</span>` : "-";
+    const displayLocation = activeNode.location || translateCountry(activeNode.country) || "-";
+    activeCardContainer.innerHTML = `
+      <div class="active-card">
+        <div class="active-card-info">
+          <div class="stat-icon-wrapper" style="background: rgba(99, 102, 241, 0.15); border-color: rgba(99, 102, 241, 0.3); width: 48px; height: 48px; border-radius: 12px;">
+            <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" style="color: #818cf8; width: 24px; height: 24px;"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+          </div>
+          <div class="active-card-details">
+            <div class="active-card-title">
+              <span class="badge available"><span class="badge-pulse"></span>已连接</span>
+              <strong>${esc(translateCountry(activeNode.country))} 节点</strong>
+            </div>
+            <div class="active-card-value mono" style="font-size: 20px; margin-top: 2px;">
+              ${esc(activeNode.ip || activeNode.remote_host)}:${activeNode.remote_port || ""}
+            </div>
+            <div class="active-card-meta" style="margin-top: 4px;">
+              <span>物理位置: <strong>${esc(displayLocation)}</strong></span>
+              <span style="margin-left: 12px;">延时: <strong>${latencyText}</strong></span>
+              <span style="margin-left: 12px;">运营主体: <strong>${esc(activeNode.owner || activeNode.as_name || "-")}</strong></span>
+              <span style="margin-left: 12px;">IP 类型: <strong>${esc(translateIpType(activeNode.ip_type))}</strong></span>
+            </div>
+          </div>
+        </div>
+        <button class="btn-danger" style="height: 38px; padding: 0 16px; border-radius: 8px;" onclick="disconnectNode()">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          断开连接
+        </button>
+      </div>
+    `;
+  } else {
+    activeCardContainer.innerHTML = `
+      <div class="active-card" style="background: var(--bg-surface); border-color: var(--border-color); box-shadow: none;">
+        <div class="active-card-info">
+          <div class="stat-icon-wrapper" style="background: rgba(244, 63, 94, 0.1); border-color: rgba(244, 63, 94, 0.2); width: 48px; height: 48px; border-radius: 12px;">
+            <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" style="color: var(--danger); width: 24px; height: 24px;"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          </div>
+          <div class="active-card-details">
+            <div class="active-card-title" style="color: var(--text-secondary);">
+              <span class="badge unavailable" style="padding: 2px 8px;">未连接</span> 当前未连接 VPN 节点
+            </div>
+            <div class="active-card-meta" style="margin-top: 4px;">
+              在下方列表中选择一个可用备用节点并点击 “切换” 按钮开始连接。
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Filter out the active node from the backups table list, apply filter search
   const shown=nodes.filter(n=>{
+    if (activeNode && n.id === activeNode.id) {
+      return false;
+    }
     if (selectedCountry && n.country !== selectedCountry) {
       return false;
     }
@@ -1823,11 +1878,10 @@ function render(){
   
   $("total").textContent=nodes.length; 
   $("target").textContent=state.target_valid_nodes||3;
-  $("active").textContent=state.active_openvpn_node_id?1:0; 
-  $("bad").textContent=state.blacklisted_nodes||0;
+  $("active").textContent=activeNode?1:0; 
   
   const statusMessage = state.last_check_message || "";
-  const activeNodeInfo = state.active_openvpn_node_id ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${state.active_openvpn_node_id}</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
+  const activeNodeInfo = activeNode ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${esc(translateCountry(activeNode.country))} (${activeNode.id})</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
   $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：http://127.0.0.1:7928 | 活动节点：${activeNodeInfo} | 状态：${statusMessage}`;
   
   // Update proxy test status card based on background checks
@@ -1849,36 +1903,103 @@ function render(){
     }
   }
 
-  $("rows").innerHTML=shown.map(n=>{
-    const isAct = n.active;
-    const badgeClass = isAct ? 'current-badge' : (n.probe_status || 'not_checked');
-    const badgeText = isAct ? '<span class="badge-pulse"></span>当前连接' : translateStatus(n.probe_status);
-    const latencyClass = getLatencyClass(n.latency_ms);
-    const latencyText = n.latency_ms ? `<span class="latency-val ${latencyClass}">${n.latency_ms} ms</span>` : "-";
-    const displayLocation = n.location || translateCountry(n.country) || "-";
-    
-    const isTesting = testingNodeIds.has(n.id);
-    const testBtn = `<button class="test-btn" ${isTesting ? 'disabled' : ''} onclick="testNode(this, '${esc(n.id)}', event)">${isTesting ? '检测中...' : '检测'}</button>`;
-    const connectBtn = `<button class="connect-btn" onclick="connectNode('${esc(n.id)}')">切换</button>`;
-    
-    return `<tr class="${isAct?'active-row':''}">
-      <td><span class="badge ${badgeClass}">${badgeText}</span></td>
-      <td>${latencyText}</td>
-      <td class="mono">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
-      <td>${esc(displayLocation)}</td>
-      <td class="mono" style="font-size:12px; color:var(--text-secondary);">${esc(n.asn||"-")}</td>
-      <td>${esc(n.owner||n.as_name||"-")}</td>
-      <td>${esc(translateQuality(n.quality))}</td>
-      <td>${esc(translateIpType(n.ip_type))}</td>
-      <td>
-        <div class="table-actions">
-          ${testBtn}
-          ${connectBtn}
-        </div>
-      </td>
-    </tr>`;
-  }).join("");
+  // Pagination calculation
+  const totalPages = Math.ceil(shown.length / pageSize) || 1;
+  if (currentPage > totalPages) currentPage = totalPages;
+  if (currentPage < 1) currentPage = 1;
+  
+  const startIndex = (currentPage - 1) * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, shown.length);
+  const pageNodes = shown.slice(startIndex, endIndex);
+
+  // Render table rows
+  if (pageNodes.length === 0) {
+    $("rows").innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
+  } else {
+    $("rows").innerHTML=pageNodes.map(n=>{
+      const badgeClass = n.probe_status || 'not_checked';
+      const badgeText = translateStatus(n.probe_status);
+      const latencyClass = getLatencyClass(n.latency_ms);
+      const latencyText = n.latency_ms ? `<span class="latency-val ${latencyClass}">${n.latency_ms} ms</span>` : "-";
+      const displayLocation = n.location || translateCountry(n.country) || "-";
+      
+      const isTesting = testingNodeIds.has(n.id);
+      const testBtn = `<button class="test-btn" ${isTesting ? 'disabled' : ''} onclick="testNode(this, '${esc(n.id)}', event)">${isTesting ? '检测中...' : '检测'}</button>`;
+      
+      // Connect button is disabled if probe status is "unavailable"
+      const isUnavailable = n.probe_status === "unavailable";
+      const connectBtn = `<button class="connect-btn" ${isUnavailable ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} onclick="connectNode('${esc(n.id)}')">切换</button>`;
+      
+      return `<tr>
+        <td><span class="badge ${badgeClass}">${badgeText}</span></td>
+        <td>${latencyText}</td>
+        <td class="mono">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
+        <td>${esc(displayLocation)}</td>
+        <td class="mono" style="font-size:12px; color:var(--text-secondary);">${esc(n.asn||"-")}</td>
+        <td>${esc(n.owner||n.as_name||"-")}</td>
+        <td>${esc(translateQuality(n.quality))}</td>
+        <td>${esc(translateIpType(n.ip_type))}</td>
+        <td>
+          <div class="table-actions">
+            ${testBtn}
+            ${connectBtn}
+          </div>
+        </td>
+      </tr>`;
+    }).join("");
+  }
+
+  // Render pagination controls
+  $("page_start").textContent = shown.length > 0 ? startIndex + 1 : 0;
+  $("page_end").textContent = endIndex;
+  $("filtered_count").textContent = shown.length;
+  $("current_page_val").textContent = currentPage;
+  $("total_pages_val").textContent = totalPages;
+  
+  $("btn_first_page").disabled = currentPage === 1;
+  $("btn_prev_page").disabled = currentPage === 1;
+  $("btn_next_page").disabled = currentPage === totalPages;
+  $("btn_last_page").disabled = currentPage === totalPages;
 }
+
+// Hook up page buttons events
+$("btn_first_page").onclick = () => { currentPage = 1; render(); };
+$("btn_prev_page").onclick = () => { if (currentPage > 1) { currentPage--; render(); } };
+$("btn_next_page").onclick = () => {
+  const q=$("search").value.toLowerCase();
+  const selectedCountry = $("country_filter").value;
+  const activeNodeId = state.active_openvpn_node_id;
+  const activeNode = nodes.find(n => n.active || n.id === activeNodeId);
+  const filtered = nodes.filter(n => {
+    if (activeNode && n.id === activeNode.id) return false;
+    if (selectedCountry && n.country !== selectedCountry) return false;
+    const searchStr = [
+      n.country, n.country_short, n.ip, n.remote_host, n.proto,
+      translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
+    ].join(" ").toLowerCase();
+    return searchStr.includes(q);
+  });
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  if (currentPage < totalPages) { currentPage++; render(); }
+};
+$("btn_last_page").onclick = () => {
+  const q=$("search").value.toLowerCase();
+  const selectedCountry = $("country_filter").value;
+  const activeNodeId = state.active_openvpn_node_id;
+  const activeNode = nodes.find(n => n.active || n.id === activeNodeId);
+  const filtered = nodes.filter(n => {
+    if (activeNode && n.id === activeNode.id) return false;
+    if (selectedCountry && n.country !== selectedCountry) return false;
+    const searchStr = [
+      n.country, n.country_short, n.ip, n.remote_host, n.proto,
+      translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
+    ].join(" ").toLowerCase();
+    return searchStr.includes(q);
+  });
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  currentPage = totalPages;
+  render();
+};
 
 async function testNode(btn, id, event){
   if (event) event.stopPropagation();
@@ -1911,10 +2032,113 @@ async function connectNode(id){
   const btn = document.querySelector(`button[onclick*="${id}"]`);
   if(btn) { btn.disabled=true; btn.textContent="连接中..."; }
   try {
-    await fetch("./api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
-  } catch(e) {}
+    const r = await fetch("./api/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
+    const result = await r.json();
+    if (!result.ok) {
+      alert("连接失败: " + (result.error || "未知错误"));
+    }
+  } catch(e) {
+    alert("连接请求错误");
+  }
   await load();
 }
+
+async function disconnectNode(){
+  if (!confirm("确定要断开当前的 VPN 连接吗？")) return;
+  try {
+    const response = await fetch("./api/disconnect", { method: "POST" });
+    const result = await response.json();
+    if (result.ok) {
+      await load();
+    } else {
+      alert("断开连接失败: " + (result.error || "未知错误"));
+    }
+  } catch (e) {
+    alert("请求断开连接失败");
+  }
+}
+
+// Batch test button implementation
+$("btn_batch_test").onclick = async () => {
+  const q = $("search").value.toLowerCase();
+  const selectedCountry = $("country_filter").value;
+  const activeNodeId = state.active_openvpn_node_id;
+  const activeNode = nodes.find(n => n.active || n.id === activeNodeId);
+  
+  const filtered = nodes.filter(n => {
+    if (activeNode && n.id === activeNode.id) return false;
+    if (selectedCountry && n.country !== selectedCountry) return false;
+    const searchStr = [
+      n.country, n.country_short, n.ip, n.remote_host, n.proto,
+      translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
+    ].join(" ").toLowerCase();
+    return searchStr.includes(q);
+  });
+  
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  if (currentPage > totalPages) currentPage = totalPages;
+  const startIndex = (currentPage - 1) * pageSize;
+  const pageNodes = filtered.slice(startIndex, startIndex + pageSize);
+  
+  if (pageNodes.length === 0) {
+    alert("当前页面没有可供测试的备选节点");
+    return;
+  }
+  
+  const nodeIds = pageNodes.map(n => n.id);
+  const btn = $("btn_batch_test");
+  btn.disabled = true;
+  batchCountdown = 15;
+  btn.innerHTML = `<span class="badge-pulse"></span>测试中... (${batchCountdown}秒)`;
+  
+  clearInterval(batchInterval);
+  batchInterval = setInterval(() => {
+    batchCountdown--;
+    if (batchCountdown > 0) {
+      btn.innerHTML = `<span class="badge-pulse"></span>测试中... (${batchCountdown}秒)`;
+    } else {
+      btn.innerHTML = `正在同步结果...`;
+      clearInterval(batchInterval);
+    }
+  }, 1000);
+  
+  try {
+    const response = await fetch("./api/test_nodes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: nodeIds })
+    });
+    const result = await response.json();
+    if (result.ok && result.nodes) {
+      result.nodes.forEach(updatedNode => {
+        const idx = nodes.findIndex(n => n.id === updatedNode.id);
+        if (idx !== -1) {
+          nodes[idx] = { ...nodes[idx], ...updatedNode };
+        }
+      });
+      // Sort nodes locally for immediate visual update
+      nodes.sort((a, b) => {
+        if (a.active) return -1;
+        if (b.active) return 1;
+        if (a.probe_status === "available" && b.probe_status !== "available") return -1;
+        if (a.probe_status !== "available" && b.probe_status === "available") return 1;
+        if (a.probe_status === "available" && b.probe_status === "available") {
+          return (a.latency_ms || 999999) - (b.latency_ms || 999999);
+        }
+        return b.score - a.score;
+      });
+    } else {
+      alert("批量测试失败: " + (result.error || "未知错误"));
+    }
+  } catch (e) {
+    alert("批量测试请求失败: " + e.message);
+  } finally {
+    clearInterval(batchInterval);
+    btn.disabled = false;
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> 批量测试本页`;
+    await load();
+  }
+};
 
 async function load(){
   const r=await fetch("./api/nodes"); 
@@ -1925,14 +2149,9 @@ async function load(){
   render();
 }
 
-$("search").oninput=render;
-$("country_filter").onchange=render;
-$("clear_bad").onclick=async()=>{ 
-  $("clear_bad").disabled=true; 
-  $("clear_bad").textContent="清理中..."; 
-  try{await fetch("./api/clear_blacklist",{method:"POST"}); await load();} 
-  finally{$("clear_bad").disabled=false; $("clear_bad").textContent="清空黑名单";}
-};
+$("search").oninput=()=>{ currentPage = 1; render(); };
+$("country_filter").onchange=()=>{ currentPage = 1; render(); };
+
 $("refresh").onclick=async()=>{ 
   $("refresh").disabled=true; 
   $("refresh").textContent="正在后台更新..."; 
@@ -1988,8 +2207,6 @@ $("btn_test_proxy").onclick = async () => {
     btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> 测试代理`;
   }
 };
-load(); 
-setInterval(load,10000);
 </script>
 </body></html>"""
 
@@ -2190,9 +2407,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "message": "已在后台启动节点更新流程"})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif effective_path == "/api/clear_blacklist":
+        elif effective_path == "/api/test_nodes":
             try:
-                self.send_json({"ok": True, "message": maintain_valid_nodes(force=True)})
+                length = parse_int(self.headers.get("Content-Length"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                node_ids = payload.get("ids", [])
+                tested_nodes = test_multiple_nodes(node_ids)
+                self.send_json({"ok": True, "nodes": tested_nodes})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/disconnect":
+            try:
+                stop_active_openvpn()
+                with lock:
+                    nodes = read_json(NODES_FILE, [])
+                    for item in nodes:
+                        item["active"] = False
+                    write_json(NODES_FILE, nodes)
+                set_state(active_openvpn_node_id="", last_check_message="手动断开连接")
+                self.send_json({"ok": True})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/connect":
@@ -2271,10 +2504,30 @@ def main() -> None:
             "active_openvpn_node_id": "",
             "last_fetch_status": "starting",
             "last_check_message": "service starting",
-            "blacklisted_nodes": len(load_blacklist()),
+            "blacklisted_nodes": 0,
         },
     )
     threading.Thread(target=proxy_server.start_proxy_server, args=(LOCAL_PROXY_HOST, LOCAL_PROXY_PORT), daemon=True).start()
+    
+    # Wait for the gateway to officially start
+    print("[网关] 正在启动代理网关...", flush=True)
+    gateway_ready = False
+    for _ in range(30):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        try:
+            s.connect((LOCAL_PROXY_HOST, LOCAL_PROXY_PORT))
+            s.close()
+            gateway_ready = True
+            break
+        except Exception:
+            time.sleep(0.5)
+            
+    if gateway_ready:
+        print("[网关] 代理网关已成功启动监听，启动同步与检测脚本...", flush=True)
+    else:
+        print("[警告] 代理网关启动超时，继续执行脚本...", flush=True)
+
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
     
