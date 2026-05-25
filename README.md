@@ -3,7 +3,7 @@
 Bilingual: [中文](#中文) | [English](#english)
 
 ---
-## 中文 测试
+## 中文
 
 ### 🚀 快速开始
 

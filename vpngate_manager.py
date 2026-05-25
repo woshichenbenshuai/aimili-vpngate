@@ -580,9 +580,25 @@ def auto_switch_node() -> None:
             log_to_json("WARNING", "VPN", err_msg)
             auto_switch_node()
     else:
-        msg = "没有可用的备选节点，请等待后台检测补齐新节点"
+        msg = "没有可用的备选节点，将自动断开并清理当前连接状态，同时在后台异步获取新节点..."
         print(f"[自动切换] {msg}", flush=True)
         log_to_json("WARNING", "VPN", msg)
+        stop_active_openvpn()
+        with lock:
+            nodes = read_json(NODES_FILE, [])
+            for item in nodes:
+                item["active"] = False
+            write_json(NODES_FILE, nodes)
+        set_state(active_openvpn_node_id="", last_check_message="没有可用的备选节点，已断开")
+        
+        def bg_fetch_and_switch():
+            try:
+                maintain_valid_nodes(force=False)
+                auto_switch_node()
+            except Exception as e:
+                print(f"[自动切换后台补齐] 获取并测试节点失败: {e}", flush=True)
+        
+        threading.Thread(target=bg_fetch_and_switch, daemon=True).start()
 
 def connect_node(node_id: str) -> str:
     global active_openvpn_process, active_openvpn_node_id, is_connecting
@@ -1525,6 +1541,10 @@ INDEX_HTML = r"""<!doctype html>
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
       清空黑名单
     </button>
+    <button id="refresh" class="btn-primary" style="background: var(--success-gradient);">
+      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
+      更新节点
+    </button>
     <button id="check" class="btn-primary">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
       立即检测补齐
@@ -1913,6 +1933,16 @@ $("clear_bad").onclick=async()=>{
   try{await fetch("./api/clear_blacklist",{method:"POST"}); await load();} 
   finally{$("clear_bad").disabled=false; $("clear_bad").textContent="清空黑名单";}
 };
+$("refresh").onclick=async()=>{ 
+  $("refresh").disabled=true; 
+  $("refresh").textContent="正在后台更新..."; 
+  try{await fetch("./api/refresh_nodes",{method:"POST"}); await load();} 
+  catch(e){}
+  setTimeout(()=>{
+    $("refresh").disabled=false; 
+    $("refresh").textContent="更新节点";
+  }, 3000);
+};
 $("check").onclick=async()=>{ 
   $("check").disabled=true; 
   $("check").textContent="检测中..."; 
@@ -2039,14 +2069,15 @@ def background_proxy_checker() -> None:
                 log_to_json("INFO", "Proxy", f"代理可用，IP: {res['ip']}, 延迟: {res['latency_ms']} ms")
             else:
                 error_msg = res.get("error", "未知错误")
-                print(f"[警告] 7928 端口本地代理当前不可用！原因: {error_msg}", flush=True)
+                if active_openvpn_node_id:
+                    print(f"[警告] 7928 端口本地代理当前不可用！原因: {error_msg}", flush=True)
+                    log_to_json("WARNING", "Proxy", f"代理不可用: {error_msg}")
                 set_state(
                     proxy_ok=False,
                     proxy_ip="-",
                     proxy_latency_ms=0,
                     proxy_error=error_msg
                 )
-                log_to_json("WARNING", "Proxy", f"代理不可用: {error_msg}")
 
                 # If we intended to have an active VPN node but proxy failed, trigger auto-switch
                 if active_openvpn_node_id:
@@ -2151,6 +2182,12 @@ class Handler(BaseHTTPRequestHandler):
         if effective_path == "/api/check":
             try:
                 self.send_json({"ok": True, "message": maintain_valid_nodes(force=True)})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/refresh_nodes":
+            try:
+                threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
+                self.send_json({"ok": True, "message": "已在后台启动节点更新流程"})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/clear_blacklist":
