@@ -29,32 +29,3 @@ logs/
 # Scratch and test files containing credentials
 scratch/
 *不要上传到GITHUB*
-*不要上传*
-*no-upload*
-*credentials*
-*secret*
-
-# Sensitive credentials, keys, and certificates
-*.key
-*.pem
-*.pub
-id_*
-*.ovpn
-*.crt
-*.p12
-*.pfx
-secrets.json
-config.json
-.env
-.env.*
-
-# Python Virtual Environments
-venv/
-.venv/
-env/
-
-# OS-specific files
-.DS_Store
-Thumbs.db
-desktop.ini
-

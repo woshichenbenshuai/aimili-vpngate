@@ -109,7 +109,6 @@ import subprocess
 import time
 import tty
 import termios
-import select
 
 INSTALL_DIR = "/opt/aimilivpn"
 LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
@@ -268,7 +267,29 @@ def get_service_pid(service_name="aimilivpn.service"):
             pid = out.split("=")[1]
             if pid and pid != "0":
                 return pid
- def print_status():
+    except Exception:
+        pass
+    return None
+
+def get_display_width(s):
+    import re
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[mGKH]')
+    s_clean = ansi_escape.sub('', s)
+    width = 0
+    for char in s_clean:
+        if ord(char) > 127:
+            width += 2
+        else:
+            width += 1
+    return width
+
+def format_line(label, value, target_width=26):
+    prefix = "  ● "
+    w = get_display_width(label)
+    padding = " " * max(0, target_width - w)
+    return f"{prefix}{label}{padding}:  {value}"
+
+def print_status():
     cfg = load_ui_cfg()
     ui_port = cfg.get("port", 8787)
     secret_path = cfg.get("secret_path", "EJsW2EeBo9lY")
@@ -310,7 +331,7 @@ def get_service_pid(service_name="aimilivpn.service"):
     print()
     print("【活动节点状态】")
     if is_connecting:
-        connecting_msg = state.get('last_check_message') or '正在建立加密隙道并验证路由规则...'
+        connecting_msg = state.get('last_check_message') or '正在建立加密隧道并验证路由规则...'
         print(format_line("节点状态", f"{yellow}{connecting_msg}{reset}"))
     elif active_ip:
         print(format_line("节点 IP", active_ip))
@@ -323,37 +344,6 @@ def get_service_pid(service_name="aimilivpn.service"):
     print(f"  export http_proxy=socks5://127.0.0.1:7928")
     print(f"  export https_proxy=socks5://127.0.0.1:7928")
     print("=======================================================")
-
-�左上角，\033[J 清除屏幕）
-            sys.stdout.write("\033[H\033[J")
-            sys.stdout.flush()
-            for line in build_status_lines():
-                wline(line)
-            now_str = time.strftime("%H:%M:%S")
-            wline()
-            wline(f"  {yellow}↺ 实时监控中  最近刷新: {now_str}  按 q 退出{reset}")
-            sys.stdout.flush()
-
-            # 等待 3 秒，同时响应按键
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                remaining = deadline - time.time()
-                if raw_mode:
-                    rlist, _, _ = select.select([sys.stdin], [], [], min(0.1, remaining))
-                    if rlist:
-                        ch = sys.stdin.read(1)
-                        if ch in ('q', 'Q', '\x03', '\x1b'):
-                            return
-                else:
-                    time.sleep(min(0.2, remaining))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if raw_mode and old_settings is not None:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        sys.stdout.write("\033[H\033[J")
-        sys.stdout.flush()
-        print("已退出实时监控模式。")
 
 def start_service():
     print("正在启动 AimiliVPN 服务...", flush=True)
@@ -551,8 +541,6 @@ def main():
             restart_service()
         elif cmd == "status":
             print_status()
-        elif cmd in ("watch", "monitor"):
-            watch_status()
         elif cmd == "logs":
             show_logs()
         elif cmd == "update":
@@ -566,22 +554,9 @@ def main():
         elif cmd == "password":
             configure_password()
         else:
-            print("未知命令。可用命令: start, stop, restart, status, watch, logs, update, uninstall, web, port, password")
+            print("未知命令。可用命令: start, stop, restart, status, logs, update, uninstall, web, port, password")
         sys.exit(0)
         
-    options = {
-        '1': ("启动服务 (ml start)", start_service),
-        '2': ("停止服务 (ml stop)", stop_service),
-        '3': ("重启服务 (ml restart)", restart_service),
-        '4': ("日志监控 (ml logs)", show_logs),
-        '5': ("网页配置 (ml web)", configure_web),
-        '6': ("端口配置 (ml port)", configure_port),
-        '7': ("密码管理 (ml password)", configure_password),
-        '8': ("一键更新 (ml update)", update_service),
-        '9': ("完全卸载 (ml uninstall)", uninstall_service),
-        '0': ("退出终端", None)
-    }
-
     options = {
         '1': ("启动服务 (ml start)", start_service),
         '2': ("停止服务 (ml stop)", stop_service),
@@ -633,8 +608,6 @@ def main():
             if func in (configure_web, configure_port, configure_password, show_logs, update_service):
                 continue
             input("\n操作已完成，按回车键返回主菜单...")
-
-
 
 if __name__ == "__main__":
     main()
