@@ -48,22 +48,26 @@ apt-get install -y openvpn curl git ca-certificates iptables iproute2 psmisc pyt
 # 4. Clone or pull the repository
 INSTALL_DIR="/opt/aimilivpn"
 echo -e "\n${YELLOW}[2/4] 正在从 GitHub 部署源代码到 ${INSTALL_DIR}...${PLAIN}"
-if [ -d "${INSTALL_DIR}" ]; then
-    echo -e "目录 ${INSTALL_DIR} 已存在，正在更新源码..."
-    cd "${INSTALL_DIR}"
-    git reset --hard || true
-    if git pull; then
-        echo -e "${GREEN}源码更新成功！${PLAIN}"
-    else
-        echo -e "${YELLOW}警告: git pull 失败，将保留当前本地源码并继续安装。${PLAIN}"
-    fi
+if [ -f "${INSTALL_DIR}/.local_dev" ]; then
+    echo -e "${GREEN}检测到本地开发模式 (.local_dev)，跳过 git pull/reset 保持本地修改。${PLAIN}"
 else
-    echo -e "正在克隆仓库 ${GITHUB_URL} ..."
-    if git clone "${GITHUB_URL}" "${INSTALL_DIR}"; then
-        echo -e "${GREEN}克隆成功！${PLAIN}"
+    if [ -d "${INSTALL_DIR}" ]; then
+        echo -e "目录 ${INSTALL_DIR} 已存在，正在更新源码..."
+        cd "${INSTALL_DIR}"
+        git reset --hard || true
+        if git pull; then
+            echo -e "${GREEN}源码更新成功！${PLAIN}"
+        else
+            echo -e "${YELLOW}警告: git pull 失败，将保留当前本地源码并继续安装。${PLAIN}"
+        fi
     else
-        echo -e "${RED}错误: 无法克隆仓库 ${GITHUB_URL}，请检查用户名是否正确及 VPS 访问 GitHub 网络！${PLAIN}"
-        exit 1
+        echo -e "正在克隆仓库 ${GITHUB_URL} ..."
+        if git clone "${GITHUB_URL}" "${INSTALL_DIR}"; then
+            echo -e "${GREEN}克隆成功！${PLAIN}"
+        else
+            echo -e "${RED}错误: 无法克隆仓库 ${GITHUB_URL}，请检查用户名是否正确及 VPS 访问 GitHub 网络！${PLAIN}"
+            exit 1
+        fi
     fi
 fi
 
@@ -155,7 +159,7 @@ def get_active_node_ip():
             with open(path, "r", encoding="utf-8") as f:
                 nodes = json.load(f)
                 for n in nodes:
-                    if n.get("active") or n.get("id") == active_id:
+                    if n.get("id") == active_id:
                         return n.get("ip") or n.get("remote_host")
         except Exception:
             pass
@@ -181,6 +185,33 @@ def ping_ip(ip):
             return "检测超时"
     except Exception:
         return "无法连接"
+
+def get_public_ip():
+    path = "/opt/aimilivpn/vpngate_data/public_ip.txt"
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                ip = f.read().strip()
+                if ip:
+                    return ip
+        except Exception:
+            pass
+    import urllib.request
+    try:
+        req = urllib.request.Request("https://api.ipify.org", headers={"User-Agent": "curl/7.68.0"})
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            ip = r.read().decode().strip()
+            if ip:
+                try:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(ip)
+                except Exception:
+                    pass
+                return ip
+    except Exception:
+        pass
+    return "您的服务器公网IP"
 
 def check_port_listening(port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -231,7 +262,7 @@ def print_status():
     pid = get_service_pid("aimilivpn.service")
     
     active_ip = get_active_node_ip()
-    latency = ping_ip(active_ip) if active_ip else None
+    latency = state.get("active_node_latency", "测试中...") if active_ip else "无活动连接"
     
     green = "\033[1;32m"
     red = "\033[1;31m"
@@ -255,7 +286,7 @@ def print_status():
     print(f"  ● 管理后台 (Port {ui_port})    :  {backend_status}")
     print(f"  ● 连接核心 (OpenVPN)       :  {openvpn_status}")
     
-    login_ip = "127.0.0.1" if cfg.get("host") == "127.0.0.1" else "您的服务器公网IP"
+    login_ip = "127.0.0.1" if cfg.get("host") == "127.0.0.1" else get_public_ip()
     print(f"  ● 网页登录地址            :  {yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}")
     print()
     print("【活动节点状态】")
@@ -263,7 +294,7 @@ def print_status():
         print(f"  ● 节点状态                 :  {yellow}正在连接到节点 {state.get('active_openvpn_node_id') or ''} (加载服务中...){reset}")
     elif active_ip:
         print(f"  ● 节点 IP                 :  {active_ip}")
-        print(f"  ● 节点延迟 (直连测试)     :  {latency or '测试中...'}")
+        print(f"  ● 节点延迟 (直连测试)     :  {latency}")
     else:
         print("  ● 节点状态                 :  无活动连接")
     print()
@@ -591,7 +622,8 @@ fi
 
 # Get VPS public IP
 echo -e "正在获取 VPS 公网 IP..."
-PUBLIC_IP=$(curl -s --max-time 3 https://api.ipify.org || curl -s --max-time 3 https://ifconfig.me || curl -s --max-time 3 icanhazip.com || echo "你的VPS公网IP")
+PUBLIC_IP=$(curl -s --max-time 3 https://api.ipify.org || curl -s --max-time 3 https://ifconfig.me || curl -s --max-time 3 icanhazip.com || echo "您的服务器公网IP")
+echo -n "$PUBLIC_IP" > "${INSTALL_DIR}/vpngate_data/public_ip.txt"
 
 echo -e "\n${GREEN}==========================================================${PLAIN}"
 echo -e "${GREEN}             AimiliVPN 源码一键部署已完成！${PLAIN}"

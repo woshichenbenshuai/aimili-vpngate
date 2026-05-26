@@ -207,17 +207,35 @@ def tcp_latency_ms(host: str, port: int, dev: str | None = None) -> int:
 
 def ping_latency_ms(host: str, port: int, fallback_ping: int = 0) -> int:
     dev = get_physical_interface()
+    # 1. Try ping with interface binding
+    if dev:
+        try:
+            cmd = ["ping", "-c", "1", "-W", "2", "-I", dev, host]
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2
+            )
+            if res.returncode == 0:
+                match = re.search(r"time=([\d.]+)\s*ms", res.stdout)
+                if match:
+                    val = int(float(match.group(1)))
+                    if val > 0:
+                        return val
+        except Exception:
+            pass
+
+    # 2. Try ping without interface binding
     try:
-        cmd = ["ping", "-c", "1", "-W", "2"]
-        if dev:
-            cmd.extend(["-I", dev])
-        cmd.append(host)
+        cmd = ["ping", "-c", "1", "-W", "2", host]
         res = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=3
+            timeout=2
         )
         if res.returncode == 0:
             match = re.search(r"time=([\d.]+)\s*ms", res.stdout)
@@ -228,10 +246,12 @@ def ping_latency_ms(host: str, port: int, fallback_ping: int = 0) -> int:
     except Exception:
         pass
 
+    # 3. Try TCP latency check
     tcp_val = tcp_latency_ms(host, port, dev)
     if tcp_val > 0:
         return tcp_val
 
+    # 4. Fallback
     if fallback_ping > 0:
         return fallback_ping
     return 0

@@ -10,6 +10,11 @@ def deploy(host, port, username, password, files_to_upload):
         ssh.connect(host, port=port, username=username, password=password, timeout=10, look_for_keys=False, allow_agent=False)
         print("Connected successfully!")
 
+        # Ensure dir and dev mode file exist
+        print("Ensuring /opt/aimilivpn directory and local dev mode exist on VPS...")
+        stdin, stdout, stderr = ssh.exec_command("mkdir -p /opt/aimilivpn && touch /opt/aimilivpn/.local_dev")
+        stdout.read() # block until command finishes
+
         # SFTP transfer
         sftp = ssh.open_sftp()
         for local_path, remote_path in files_to_upload:
@@ -71,6 +76,7 @@ if __name__ == "__main__":
         config["password"], 
         [
             (os.path.join(os.path.dirname(os.path.dirname(__file__)), "vpngate_manager.py"), "/opt/aimilivpn/vpngate_manager.py"),
+            (os.path.join(os.path.dirname(os.path.dirname(__file__)), "vpn_utils.py"), "/opt/aimilivpn/vpn_utils.py"),
             (os.path.join(os.path.dirname(os.path.dirname(__file__)), "install.sh"), "/opt/aimilivpn/install.sh")
         ]
     )

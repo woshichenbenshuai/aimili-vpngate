@@ -11,19 +11,19 @@ def run_verification(host, port, username, password):
 
         commands = [
             # Check current daemon state (should be disconnected, since we just restarted it)
-            "curl -s http://127.0.0.1:8787/EJsW2EeBo9lY/api/nodes | python3 -c 'import sys, json; data=json.load(sys.stdin); print(json.dumps(data[\"state\"], indent=2))'",
+            "python3 -c 'import json, hashlib, urllib.request; cfg = json.load(open(\"/opt/aimilivpn/vpngate_data/ui_auth.json\")); token = hashlib.sha256((cfg.get(\"password\", \"\") + \"aimilivpn_secure_salt_2026\").encode()).hexdigest(); req = urllib.request.Request(\"http://127.0.0.1:8787/EJsW2EeBo9lY/api/nodes\", headers={\"Cookie\": f\"session={token}\"}); res = json.loads(urllib.request.urlopen(req).read().decode()); print(json.dumps(res[\"state\"], indent=2))'",
             
-            # Trigger manual update/refresh of nodes
-            "curl -s -X POST http://127.0.0.1:8787/EJsW2EeBo9lY/api/refresh_nodes",
+            # Wait 15 seconds to let the automatic node connection/pinger run
+            "sleep 15",
             
-            # Wait a few seconds for the background fetch to initiate
-            "sleep 3",
+            # Query state again to see if active node ID is populated and active_node_latency is set
+            "python3 -c 'import json, hashlib, urllib.request; cfg = json.load(open(\"/opt/aimilivpn/vpngate_data/ui_auth.json\")); token = hashlib.sha256((cfg.get(\"password\", \"\") + \"aimilivpn_secure_salt_2026\").encode()).hexdigest(); req = urllib.request.Request(\"http://127.0.0.1:8787/EJsW2EeBo9lY/api/nodes\", headers={\"Cookie\": f\"session={token}\"}); res = json.loads(urllib.request.urlopen(req).read().decode()); print(json.dumps(res[\"state\"], indent=2))'",
             
-            # Query state again to see if state is updated (valid_nodes and last_check_message should change)
-            "curl -s http://127.0.0.1:8787/EJsW2EeBo9lY/api/nodes | python3 -c 'import sys, json; data=json.load(sys.stdin); print(json.dumps(data[\"state\"], indent=2))'",
+            # Run ml status to check CLI output
+            "ml status",
             
-            # Check syslog to see if there are any [警告] tun0 warnings (there should be none, since we are disconnected but active_openvpn_node_id is empty)
-            "tail -n 30 /var/log/syslog | grep -E 'vpngate_manager|python3' || echo 'No vpngate syslog entries found'"
+            # Check journal logs for any pinger errors
+            "journalctl -u aimilivpn --no-pager -n 40"
         ]
 
         for cmd in commands:

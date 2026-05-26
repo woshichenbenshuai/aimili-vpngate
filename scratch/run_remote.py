@@ -28,9 +28,11 @@ def run_commands(host, port, username, password, commands):
 
 if __name__ == "__main__":
     commands = [
-        "cat /opt/aimilivpn/vpngate_data/state.json",
-        "curl -s http://127.0.0.1:8787/EJsW2EeBo9lY/api/nodes | python3 -c 'import sys, json; data=json.load(sys.stdin); print(json.dumps(data[\"state\"], indent=2))'",
-        "curl -s http://127.0.0.1:8787/EJsW2EeBo9lY/api/nodes | python3 -c 'import sys, json; data=json.load(sys.stdin); print(\"Total nodes:\", len(data[\"nodes\"])); print(\"Active nodes:\", [n[\"id\"] for n in data[\"nodes\"] if n.get(\"active\")])'",
-        "curl -s -X POST http://127.0.0.1:8787/EJsW2EeBo9lY/api/test_proxy | python3 -m json.tool"
+        "grep -n -C 5 \"def active_node_pinger\" /opt/aimilivpn/vpngate_manager.py"
     ]
-    run_commands("107.175.230.117", 22, "root", "9Qet0EcR6P4h1n8LPg", commands)
+    import json
+    import os
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "服务器连接配置_不要上传到GITHUB.json")
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    run_commands(config["host"], config["port"], config["username"], config["password"], commands)

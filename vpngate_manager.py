@@ -766,7 +766,8 @@ def connect_node(node_id: str) -> str:
             if item["active"]:
                 item["probe_message"] = f"Active node. HTTP proxy: http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}"
         write_json(NODES_FILE, nodes)
-        set_state(active_openvpn_node_id=node_id, last_check_message=f"Connected {node_id}")
+        latency_str = f"{last_active_latency} ms" if last_active_latency > 0 else "连接超时"
+        set_state(active_openvpn_node_id=node_id, last_check_message=f"Connected {node_id}", active_node_latency=latency_str)
         log_to_json("INFO", "VPN", f"节点 {node_id} 连接成功，出口网卡 tun0 已启用")
         return f"Connected {node_id}"
     finally:
@@ -2693,6 +2694,36 @@ def background_proxy_checker() -> None:
             log_to_json("ERROR", "Proxy", f"检测守护线程发生异常: {e}")
         time.sleep(30)
 
+def active_node_pinger() -> None:
+    global active_openvpn_node_id, is_connecting
+    while True:
+        try:
+            if active_openvpn_running() and active_openvpn_node_id:
+                nodes = read_json(NODES_FILE, [])
+                node = next((n for n in nodes if n.get("id") == active_openvpn_node_id), None)
+                if node:
+                    ip = node.get("ip") or node.get("remote_host")
+                    port = parse_int(node.get("remote_port"))
+                    fallback = parse_int(node.get("ping"))
+                    if ip:
+                        latency = vpn_utils.ping_latency_ms(ip, port, fallback)
+                        if latency > 0:
+                            set_state(active_node_latency=f"{latency} ms")
+                        else:
+                            set_state(active_node_latency="检测超时")
+                    else:
+                        set_state(active_node_latency="检测超时")
+                else:
+                    set_state(active_node_latency="检测超时")
+            elif is_connecting:
+                set_state(active_node_latency="测试中...")
+            else:
+                set_state(active_node_latency="无活动连接")
+        except Exception as e:
+            print(f"[ERROR] active_node_pinger error: {e}", flush=True)
+        time.sleep(10)
+
+
 class Handler(BaseHTTPRequestHandler):
     def get_secret_path(self) -> str:
         auth_file = DATA_DIR / "ui_auth.json"
@@ -2781,9 +2812,11 @@ class Handler(BaseHTTPRequestHandler):
         if effective_path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif effective_path == "/api/nodes":
-            global last_active_ping_time, last_active_latency
+            global last_active_ping_time, last_active_latency, active_openvpn_node_id
             nodes = read_json(NODES_FILE, [])
-            active_node = next((n for n in nodes if n.get("active")), None)
+            active_node = next((n for n in nodes if active_openvpn_node_id and n.get("id") == active_openvpn_node_id), None)
+            for n in nodes:
+                n["active"] = (active_openvpn_node_id and n.get("id") == active_openvpn_node_id)
             if active_node:
                 ip = active_node.get("ip") or active_node.get("remote_host")
                 if ip:
@@ -2887,7 +2920,7 @@ class Handler(BaseHTTPRequestHandler):
                 global last_active_ping_time, last_active_latency
                 last_active_ping_time = 0.0
                 last_active_latency = 0
-                set_state(active_openvpn_node_id="", last_check_message="手动断开连接")
+                set_state(active_openvpn_node_id="", last_check_message="手动断开连接", active_node_latency="无活动连接")
                 self.send_json({"ok": True})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -2993,6 +3026,7 @@ def main() -> None:
 
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
+    threading.Thread(target=active_node_pinger, daemon=True).start()
     
     ui_cfg = load_ui_config()
     ui_host = ui_cfg.get("host", UI_HOST)
