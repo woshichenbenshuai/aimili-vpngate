@@ -82,17 +82,14 @@ import random
 
 def generate_random_password() -> str:
     import string
-    # Safe symbols: avoid quotes or backslashes to avoid shell escaping issues
-    symbols = "!@#$%^&*"
-    chars = string.ascii_letters + string.digits + symbols
+    chars = string.ascii_letters + string.digits
     while True:
         pwd = "".join(random.choices(chars, k=12))
-        # Ensure it contains at least one lowercase, one uppercase, one digit, and one symbol
+        # Ensure it contains at least one lowercase, one uppercase, and one digit
         has_lower = any(c.islower() for c in pwd)
         has_upper = any(c.isupper() for c in pwd)
         has_digit = any(c.isdigit() for c in pwd)
-        has_symbol = any(c in symbols for c in pwd)
-        if has_lower and has_upper and has_digit and has_symbol:
+        if has_lower and has_upper and has_digit:
             return pwd
 
 def load_ui_config() -> dict[str, Any]:
@@ -188,6 +185,13 @@ def get_state() -> dict[str, Any]:
     state.setdefault("last_fetch_status", "not_started")
     state.setdefault("last_check_message", "")
     state.setdefault("blacklisted_nodes", 0)
+    
+    # Pre-populate settings inputs in UI
+    ui_cfg = load_ui_config()
+    state["username"] = ui_cfg.get("username", "admin")
+    state["port"] = ui_cfg.get("port", 8787)
+    state["secret_path"] = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
+    
     return state
 
 def safe_name(value: str) -> str:
@@ -1149,7 +1153,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
         <div class="form-group">
           <label class="form-label" for="username">管理账号</label>
           <div class="input-wrapper">
-            <input type="text" id="username" class="input-field" placeholder="请输入管理账号" required autocomplete="username" value="admin">
+            <input type="text" id="username" class="input-field" placeholder="请输入管理账号" required autocomplete="username">
           </div>
         </div>
         <div class="form-group" style="margin-top: 16px;">
@@ -1906,6 +1910,107 @@ INDEX_HTML = r"""<!doctype html>
         width: 100%;
       }
     }
+    
+    /* Admin dropdown styles */
+    .dropdown {
+      position: relative;
+      display: inline-block;
+    }
+    .dropdown-content {
+      display: none;
+      position: absolute;
+      right: 0;
+      margin-top: 6px;
+      min-width: 140px;
+      background: rgba(22, 30, 49, 0.95);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      z-index: 1000;
+      overflow: hidden;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    .dropdown-content a {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      color: var(--text-primary);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+    .dropdown-content a:hover {
+      background: rgba(255,255,255,0.08);
+    }
+    
+    /* Modal styles */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 10000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      background-color: rgba(9, 13, 22, 0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-content {
+      background: rgba(22, 30, 49, 0.9);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      width: 90%;
+      max-width: 480px;
+      padding: 32px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+      position: relative;
+      box-sizing: border-box;
+      animation: modalFadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    @keyframes modalFadeIn {
+      from { transform: scale(0.95); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+    
+    /* Inputs in settings */
+    .form-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    .form-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+      margin-left: 4px;
+    }
+    .input-field {
+      width: 100%;
+      height: 40px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 0 12px;
+      box-sizing: border-box;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 14px;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+    .input-field:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+      background: rgba(15, 23, 42, 0.6);
+    }
   </style>
 </head>
 <body>
@@ -1926,6 +2031,23 @@ INDEX_HTML = r"""<!doctype html>
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
       立即检测补齐
     </button>
+    <div class="dropdown">
+      <button id="admin_btn" class="btn-primary" style="background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border-color); color: var(--text-primary);">
+        <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+        管理员
+        <svg xmlns="http://www.w3.org/2000/svg" style="width:12px; height:12px; margin-left: 2px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+      </button>
+      <div id="admin_dropdown" class="dropdown-content">
+        <a href="javascript:void(0)" onclick="openSettingsModal()">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+          设置
+        </a>
+        <a href="javascript:void(0)" onclick="logoutAdmin()" style="color: var(--danger); border-top: 1px solid rgba(255,255,255,0.05);">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+          退出
+        </a>
+      </div>
+    </div>
   </div>
 </header>
 <main>
@@ -2067,6 +2189,69 @@ INDEX_HTML = r"""<!doctype html>
         <button id="btn_next_page" class="connect-btn" style="height: 32px; padding: 0 10px;">下一页</button>
         <button id="btn_last_page" class="connect-btn" style="height: 32px; padding: 0 10px;">尾页</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings_modal" class="modal">
+    <div class="modal-content">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <h3 style="margin: 0; font-size: 18px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:20px; height:20px; color: var(--primary);" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+          管理员设置
+        </h3>
+        <button type="button" onclick="closeSettingsModal()" style="background: transparent; border: none; padding: 4px; cursor: pointer; color: var(--text-secondary); width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%;" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='transparent'">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+      </div>
+      
+      <div id="settings_error" style="color: var(--danger); font-size: 13px; margin-bottom: 16px; padding: 8px 12px; background: rgba(244,63,94,0.1); border: 1px solid rgba(244,63,94,0.2); border-radius: 6px; display: none;"></div>
+      <div id="settings_success" style="color: var(--success); font-size: 13px; margin-bottom: 16px; padding: 8px 12px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); border-radius: 6px; display: none;"></div>
+
+      <form id="settings_form" onsubmit="saveSettings(event)">
+        <div style="border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 16px; margin-bottom: 16px;">
+          <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); font-weight: 600; margin-bottom: 12px;">修改网页访问配置</div>
+          
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label class="form-label" for="settings_port">网页端口</label>
+            <input type="number" id="settings_port" class="input-field" required min="1" max="65535" placeholder="8787">
+          </div>
+          
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label class="form-label" for="settings_suffix">登录安全后缀 (仅字母数字)</label>
+            <input type="text" id="settings_suffix" class="input-field" required pattern="[A-Za-z0-9]+" placeholder="EJsW2EeBo9lY">
+          </div>
+
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label class="form-label" for="settings_new_username">新管理账号 (留空则不修改)</label>
+            <input type="text" id="settings_new_username" class="input-field" placeholder="留空则不修改">
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label" for="settings_new_password">新安全密码 (留空则不修改)</label>
+            <input type="password" id="settings_new_password" class="input-field" placeholder="留空则不修改">
+          </div>
+        </div>
+        
+        <div style="margin-bottom: 24px;">
+          <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); font-weight: 600; margin-bottom: 12px;">安全验证 (必须输入当前账号密码)</div>
+          
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label class="form-label" for="settings_curr_username">当前管理账号</label>
+            <input type="text" id="settings_curr_username" class="input-field" required placeholder="请输入当前管理账号">
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label" for="settings_curr_password">当前安全密码</label>
+            <input type="password" id="settings_curr_password" class="input-field" required placeholder="请输入当前安全密码">
+          </div>
+        </div>
+        
+        <div style="display: flex; gap: 12px; justify-content: flex-end;">
+          <button type="button" onclick="closeSettingsModal()" style="height: 40px; padding: 0 16px; font-weight: 600; border-radius: 8px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); cursor: pointer;">取消</button>
+          <button type="submit" id="settings_submit_btn" class="btn-primary" style="height: 40px; padding: 0 20px; font-weight: 600; border-radius: 8px;">保存修改</button>
+        </div>
+      </form>
     </div>
   </div>
 </main>
@@ -2661,6 +2846,122 @@ $("btn_test_proxy").onclick = async () => {
   }
 };
 
+// Admin dropdown toggle
+const adminBtn = $("admin_btn");
+const adminDropdown = $("admin_dropdown");
+if (adminBtn && adminDropdown) {
+  adminBtn.onclick = (e) => {
+    e.stopPropagation();
+    const isShow = adminDropdown.style.display === "block";
+    adminDropdown.style.display = isShow ? "none" : "block";
+  };
+  document.addEventListener("click", () => {
+    adminDropdown.style.display = "none";
+  });
+}
+
+function openSettingsModal() {
+  $("settings_error").style.display = "none";
+  $("settings_success").style.display = "none";
+  $("settings_form").reset();
+  
+  if (state) {
+    $("settings_port").value = state.port || 8787;
+    $("settings_suffix").value = state.secret_path || "EJsW2EeBo9lY";
+  }
+  
+  $("settings_modal").style.display = "flex";
+  $("admin_dropdown").style.display = "none";
+}
+
+function closeSettingsModal() {
+  $("settings_modal").style.display = "none";
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const errorDivEl = $("settings_error");
+  const successDiv = $("settings_success");
+  const submitBtn = $("settings_submit_btn");
+  
+  errorDivEl.style.display = "none";
+  successDiv.style.display = "none";
+  
+  const port = parseInt($("settings_port").value);
+  const suffix = $("settings_suffix").value.trim();
+  const newUsername = $("settings_new_username").value.trim();
+  const newPassword = $("settings_new_password").value.trim();
+  const currUsername = $("settings_curr_username").value.trim();
+  const currPassword = $("settings_curr_password").value.trim();
+  
+  if (isNaN(port) || port < 1 || port > 65535) {
+    errorDivEl.textContent = "端口范围必须在 1 至 65535 之间";
+    errorDivEl.style.display = "block";
+    return;
+  }
+  
+  if (!/^[A-Za-z0-9]+$/.test(suffix)) {
+    errorDivEl.textContent = "登录安全后缀仅能由英文字母和数字组成";
+    errorDivEl.style.display = "block";
+    return;
+  }
+  
+  submitBtn.disabled = true;
+  submitBtn.textContent = "正在保存...";
+  
+  try {
+    const res = await fetch("./api/update_settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        port: port,
+        secret_path: suffix,
+        new_username: newUsername,
+        new_password: newPassword,
+        curr_username: currUsername,
+        curr_password: currPassword
+      })
+    });
+    
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      successDiv.textContent = "保存成功！页面将在 4 秒内自动跳转至新地址...";
+      successDiv.style.display = "block";
+      
+      const inputs = $("settings_form").querySelectorAll("input, button");
+      inputs.forEach(el => el.disabled = true);
+      
+      setTimeout(() => {
+        const protocol = window.location.protocol;
+        const host = window.location.hostname;
+        window.location.href = `${protocol}//${host}:${port}/${suffix}/`;
+      }, 4000);
+    } else {
+      errorDivEl.textContent = data.error || "保存失败，请检查输入";
+      errorDivEl.style.display = "block";
+      submitBtn.disabled = false;
+      submitBtn.textContent = "保存修改";
+    }
+  } catch (err) {
+    errorDivEl.textContent = "连接服务器失败，请稍后重试";
+    errorDivEl.style.display = "block";
+    submitBtn.disabled = false;
+    submitBtn.textContent = "保存修改";
+  }
+}
+
+async function logoutAdmin() {
+  try {
+    const res = await fetch("./api/logout", { method: "POST" });
+    if (res.ok) {
+      window.location.reload();
+    }
+  } catch (err) {
+    console.error("退出登录失败", err);
+    window.location.reload();
+  }
+}
+
 // 页面加载时自动初始化数据
 load();
 
@@ -2976,8 +3277,82 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if effective_path == "/api/logout":
+            try:
+                secret_path = self.get_secret_path()
+                cookie_path = f"/{secret_path}/" if secret_path else "/"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Set-Cookie", f"session=; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True}).encode("utf-8"))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if not self.is_authorized():
             self.send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        if effective_path == "/api/update_settings":
+            try:
+                length = parse_int(self.headers.get("Content-Length"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                
+                curr_username = str(payload.get("curr_username") or "")
+                curr_password = str(payload.get("curr_password") or "")
+                
+                new_port = payload.get("port")
+                new_suffix = str(payload.get("secret_path") or "").strip()
+                new_username = str(payload.get("new_username") or "").strip()
+                new_password = str(payload.get("new_password") or "").strip()
+                
+                if not curr_username or not curr_password:
+                    self.send_json({"ok": False, "error": "请输入当前账号和密码进行安全验证"}, HTTPStatus.FORBIDDEN)
+                    return
+                
+                ui_cfg = load_ui_config()
+                expected_uname = ui_cfg.get("username", "admin")
+                expected_pwd = ui_cfg.get("password", "")
+                
+                if curr_username != expected_uname or curr_password != expected_pwd:
+                    self.send_json({"ok": False, "error": "当前账号或密码不正确"}, HTTPStatus.FORBIDDEN)
+                    return
+                
+                try:
+                    new_port_int = int(new_port)
+                    if not (1 <= new_port_int <= 65535):
+                        raise ValueError()
+                except (TypeError, ValueError):
+                    self.send_json({"ok": False, "error": "端口范围必须是 1 至 65535"}, HTTPStatus.BAD_REQUEST)
+                    return
+                
+                if not new_suffix or not re.match(r"^[A-Za-z0-9]+$", new_suffix):
+                    self.send_json({"ok": False, "error": "安全后缀仅能由英文字母和数字组成"}, HTTPStatus.BAD_REQUEST)
+                    return
+                
+                ui_cfg["port"] = new_port_int
+                ui_cfg["secret_path"] = new_suffix
+                if new_username:
+                    ui_cfg["username"] = new_username
+                if new_password:
+                    ui_cfg["password"] = new_password
+                
+                auth_file = DATA_DIR / "ui_auth.json"
+                with lock:
+                    DATA_DIR.mkdir(exist_ok=True, parents=True)
+                    auth_file.write_text(json.dumps(ui_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+                
+                self.send_json({"ok": True, "message": "配置更新成功，系统将在 2 秒内重启..."})
+                
+                def restart_server():
+                    time.sleep(2)
+                    print("[系统] 管理后台配置更新，进程即将退出以触发自动重启...", flush=True)
+                    os._exit(0)
+                
+                threading.Thread(target=restart_server, daemon=True).start()
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if effective_path == "/api/check":

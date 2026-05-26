@@ -30,7 +30,7 @@ logs/
 
 # Scratch and test files containing credentials
 scratch/
-*不要上传到GITHUB*
+*连接配置*
 
 # Local analysis and doc files
 AimiliVPN_Analysis_ZH.md

@@ -116,11 +116,10 @@ LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
 def generate_random_password():
     import random
     import string
-    symbols = "!@#$%^&*"
-    chars = string.ascii_letters + string.digits + symbols
+    chars = string.ascii_letters + string.digits
     while True:
         pwd = "".join(random.choices(chars, k=12))
-        if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd) and any(c in symbols for c in pwd):
+        if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd):
             return pwd
 
 def generate_random_suffix():
@@ -380,19 +379,53 @@ def show_logs():
         time.sleep(2)
 
 def update_service():
-    print("正在一键更新 AimiliVPN 至最新版本并清理旧代码...", flush=True)
+    print("正在获取远程更新并检测版本...", flush=True)
     if os.path.exists(INSTALL_DIR):
         try:
             os.chdir(INSTALL_DIR)
-            subprocess.run(["git", "fetch", "--all"], check=True)
+            if not os.path.exists(".git"):
+                print("错误: 当前安装目录不是 Git 仓库，无法通过 Git 更新。")
+                time.sleep(3)
+                return
+            
+            # Fetch remote origin updates
+            subprocess.run(["git", "fetch", "--all"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
             res = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, text=True)
             branch = res.stdout.strip() or "main"
+            
+            local_commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            remote_commit = subprocess.run(["git", "rev-parse", f"origin/{branch}"], capture_output=True, text=True).stdout.strip()
+            
+            if local_commit == remote_commit:
+                print("\n【版本状态】当前已是最新版本，无需更新！")
+                override = input("是否强制重新拉取代码并覆盖安装？(y/N): ").strip().lower()
+                if override != 'y':
+                    print("已取消更新。")
+                    time.sleep(1.5)
+                    return
+            else:
+                print(f"\n【检测到更新】本地版本: {local_commit[:8]}，远程最新版本: {remote_commit[:8]}")
+                confirm = input("是否确认开始更新并重启服务？(Y/n): ").strip().lower()
+                if confirm not in ('', 'y', 'yes'):
+                    print("已取消更新。")
+                    time.sleep(1.5)
+                    return
+            
+            print("\n正在强制重置本地代码至最新版本...", flush=True)
             subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], check=True)
+            
+            # Clean up python cache files
+            print("正在清理 Python 缓存 (pycache)...", flush=True)
+            subprocess.run(["find", ".", "-type", "d", "-name", "__pycache__", "-exec", "rm", "-rf", "{}", "+"], check=False)
+            
             print("代码拉取成功，正在重新运行安装脚本...", flush=True)
             subprocess.run(["bash", "install.sh"])
+            print("更新已完成！")
+            time.sleep(2)
         except Exception as e:
             print(f"更新失败: {e}")
-            time.sleep(3)
+            time.sleep(4)
     else:
         print(f"未找到安装目录: {INSTALL_DIR}")
         time.sleep(2)
@@ -693,11 +726,10 @@ if [ ! -f "$AUTH_FILE" ]; then
     # generate random password
     UI_PASSWORD=$(python3 -c "
 import random, string
-symbols = '!@#\$%^&*'
-chars = string.ascii_letters + string.digits + symbols
+chars = string.ascii_letters + string.digits
 while True:
     pwd = ''.join(random.choices(chars, k=12))
-    if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd) and any(c in symbols for c in pwd):
+    if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd):
         print(pwd)
         break
 ")
