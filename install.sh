@@ -56,11 +56,22 @@ else
     if [ -d "${INSTALL_DIR}" ]; then
         echo -e "  -> 目录 ${INSTALL_DIR} 已存在，正在更新并强制覆盖本地源码..."
         cd "${INSTALL_DIR}"
-        git reset --hard || true
-        if git pull; then
+        git fetch --all || true
+        BRANCH="main"
+        if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            BRANCH="main"
+        elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+            BRANCH="master"
+        fi
+        echo -e "  -> 正在强制重置本地源码至 origin/${BRANCH} ..."
+        if git reset --hard "origin/${BRANCH}"; then
             echo -e "${GREEN}  -> 源码更新成功！${PLAIN}"
         else
-            echo -e "${YELLOW}  -> 警告: git pull 失败，将保留当前本地源码并继续安装。${PLAIN}"
+            if git pull; then
+                echo -e "${GREEN}  -> 源码更新成功！${PLAIN}"
+            else
+                echo -e "${YELLOW}  -> 警告: git pull/reset 失败，将保留当前本地源码并继续安装。${PLAIN}"
+            fi
         fi
     else
         echo -e "  -> 正在克隆 GitHub 仓库 ${GITHUB_URL} ..."
@@ -391,8 +402,13 @@ def update_service():
             # Fetch remote origin updates
             subprocess.run(["git", "fetch", "--all"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            res = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, text=True)
-            branch = res.stdout.strip() or "main"
+            # Detect remote branch (check origin/main, then origin/master)
+            branch = "main"
+            for b in ["main", "master"]:
+                chk = subprocess.run(["git", "rev-parse", "--verify", f"origin/{b}"], capture_output=True, text=True)
+                if chk.returncode == 0:
+                    branch = b
+                    break
             
             local_commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             remote_commit = subprocess.run(["git", "rev-parse", f"origin/{branch}"], capture_output=True, text=True).stdout.strip()
@@ -412,7 +428,7 @@ def update_service():
                     time.sleep(1.5)
                     return
             
-            print("\n正在强制重置本地代码至最新版本...", flush=True)
+            print(f"\n正在强制重置本地代码至 origin/{branch} ...", flush=True)
             subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], check=True)
             
             # Clean up python cache files
