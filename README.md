@@ -39,50 +39,37 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 * **`ml password`**：生成新的 12 位安全管理密码。
 * **`ml uninstall`**：完全卸载服务并清理相关环境。
 
-#### 💡 首次安装注意事项与常见报错解决（小白必看）
+#### 💡 首次安装与常见报错解决（小白必看）
 
-1. **全新/纯净系统依赖安装**
-   在首次安装时，如果您的系统（Ubuntu 18/20/22/24/26 或 Debian）是全新安装的极简系统，可能会因为缺少 `curl` 或 SSL 证书组件（`ca-certificates`）导致一键脚本下载失败。
-   请在运行安装脚本前，先执行以下命令安装依赖：
-   ```bash
-   apt-get update && apt-get install -y curl ca-certificates
-   # 如果是非 root 用户，请加上 sudo：
-   # sudo apt-get update && sudo apt-get install -y curl ca-certificates
-   ```
-   * **Debian 系统特别提示**：本脚本一键安装包默认限制了仅在 Ubuntu 系统中执行。Debian 用户如需运行，可先运行以下命令下载脚本，并使用 `sed` 临时将系统类型限制替换为 `"ubuntu"` 后再执行安装：
-     ```bash
-     curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh -o install.sh
-     sed -i 's/"${ID:-}"/"ubuntu"/g' install.sh
-     sudo bash install.sh
-     ```
+##### 1. 极简系统缺少依赖（Ubuntu 18-26 / Debian 首次安装）
+如果系统是全新纯净版，可能会因为缺少 `curl` 或 `ca-certificates` 导致一键安装脚本下载失败。请在安装前执行以下命令补充依赖：
+```bash
+sudo apt-get update && sudo apt-get install -y curl ca-certificates
+```
 
-2. **包管理器被占用报错（锁冲突）**
-   如果系统在刚启动或后台自动更新时运行安装脚本，可能会提示以下类似错误：
-   * `Could not get lock /var/lib/dpkg/lock-frontend - open (11: Resource temporarily unavailable)`
-   * `Unable to acquire the dpkg frontend lock (...), is another process using it?`
-   * `E: 无法获得锁 /var/lib/dpkg/lock-frontend`
+##### 2. Debian 系统兼容运行方法
+本脚本一键包默认限制在 Ubuntu 系统运行。Debian 用户如需运行，可先下载并用 `sed` 临时将系统类型限制替换为 `"ubuntu"` 后再执行安装：
+```bash
+curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh -o install.sh
+sed -i 's/"${ID:-}"/"ubuntu"/g' install.sh
+sudo bash install.sh
+```
 
-   **解决方法**：需要停止后台的自动更新服务，强制终止相关进程，清理锁文件，然后重新安装。依次输入并执行以下命令：
-   ```bash
-   # 1. 停止并禁用后台自动更新服务，防止它自动重启并重新加锁
-   sudo systemctl stop unattended-upgrades 2>/dev/null
-   
-   # 2. 终止正在运行的 apt/dpkg 进程
-   sudo killall apt apt-get dpkg 2>/dev/null
-   
-   # 3. 强制删除所有 apt 和 dpkg 锁文件
-   sudo rm -f /var/lib/dpkg/lock-frontend
-   sudo rm -f /var/lib/dpkg/lock
-   sudo rm -f /var/lib/apt/lists/lock
-   sudo rm -f /var/cache/apt/archives/lock
-   
-   # 4. 修复并重新配置受损的包
-   sudo dpkg --configure -a
-   
-   # 5. 重新更新源并重试安装
-   sudo apt-get update
-   ```
-   执行完上述命令后，再次运行安装脚本即可。
+##### 3. 包管理器被占用（Apt 锁冲突报错解决）
+若一键安装提示 `Could not get lock /var/lib/dpkg/lock-frontend` 等“无法获得锁”的报错，可运行以下命令解除占用并重新安装：
+```bash
+# 1. 停止自动更新服务并终止相关进程
+sudo systemctl stop unattended-upgrades 2>/dev/null
+sudo killall apt apt-get dpkg 2>/dev/null
+
+# 2. 清理残留锁文件
+sudo rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+
+# 3. 修复受损包并重新更新源
+sudo dpkg --configure -a
+sudo apt-get update
+```
+执行完毕后，重新运行一键安装脚本即可。
 
 ---
 
@@ -161,44 +148,32 @@ Once installed, use the global command `ml` to launch the interactive helper men
 
 #### 💡 Troubleshooting & First-Time Installation Tips
 
-1. **Minimal / Clean OS Dependencies**
-   On a brand new minimal Linux system (Ubuntu 18/20/22/24/26 or Debian), the installation might fail if tools like `curl` or SSL root certificates (`ca-certificates`) are missing.
-   Run the following command to pre-install dependencies before running the setup script:
-   ```bash
-   apt-get update && apt-get install -y curl ca-certificates
-   # Or with sudo if you are not running as root:
-   # sudo apt-get update && sudo apt-get install -y curl ca-certificates
-   ```
-   * **Debian OS Special Note**: The installation script is restricted to Ubuntu by default. If you are on Debian, download the script first and run a simple `sed` replacement to bypass the OS restriction:
-     ```bash
-     curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh -o install.sh
-     sed -i 's/"${ID:-}"/"ubuntu"/g' install.sh
-     sudo bash install.sh
-     ```
+##### 1. Missing Dependencies on Minimal OS (Ubuntu / Debian)
+If you are using a brand new minimal OS, the installation might fail due to missing `curl` or `ca-certificates`. Run the following command to pre-install dependencies:
+```bash
+sudo apt-get update && sudo apt-get install -y curl ca-certificates
+```
 
-2. **Package Manager Locked / Busy Errors (`apt`/`dpkg` lock)**
-   If the OS is performing unattended background upgrades or another apt process was interrupted, you may encounter error messages like:
-   * `Could not get lock /var/lib/dpkg/lock-frontend - open (11: Resource temporarily unavailable)`
-   * `Unable to acquire the dpkg frontend lock (...), is another process using it?`
+##### 2. Bypass OS Restrictions for Debian
+The script is restricted to Ubuntu by default. For Debian systems, run the following commands to download, patch, and install:
+```bash
+curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh -o install.sh
+sed -i 's/"${ID:-}"/"ubuntu"/g' install.sh
+sudo bash install.sh
+```
 
-   **Solution**: Stop the background auto-update service, force-terminate the blocking update processes, clear the stale lock files, and resume installation. Run the following commands sequentially:
-   ```bash
-   # 1. Stop background unattended upgrades service
-   sudo systemctl stop unattended-upgrades 2>/dev/null
-   
-   # 2. Terminate running apt/dpkg processes
-   sudo killall apt apt-get dpkg 2>/dev/null
-   
-   # 3. Force delete apt/dpkg lock files
-   sudo rm -f /var/lib/dpkg/lock-frontend
-   sudo rm -f /var/lib/dpkg/lock
-   sudo rm -f /var/lib/apt/lists/lock
-   sudo rm -f /var/cache/apt/archives/lock
-   
-   # 4. Reconfigure interrupted packages
-   sudo dpkg --configure -a
-   
-   # 5. Refresh package list
-   sudo apt-get update
-   ```
-   After performing these steps, re-run the installation command.
+##### 3. Package Manager Locked (`apt`/`dpkg` Lock Errors)
+If you see `Could not get lock /var/lib/dpkg/lock-frontend` or similar busy errors, run these commands to unlock and retry:
+```bash
+# 1. Stop automatic upgrades & kill active processes
+sudo systemctl stop unattended-upgrades 2>/dev/null
+sudo killall apt apt-get dpkg 2>/dev/null
+
+# 2. Remove lock files
+sudo rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+
+# 3. Repair package states & update
+sudo dpkg --configure -a
+sudo apt-get update
+```
+Once done, re-run the installation script.
