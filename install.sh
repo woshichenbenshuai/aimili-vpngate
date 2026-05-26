@@ -74,6 +74,8 @@ cat > /lib/systemd/system/aimilivpn.service <<EOF
 Description=AimiliVPN OpenVPN Manager with HTTP/SOCKS5 Proxy
 After=network.target
 
+[Service]
+Type=simple
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=/usr/bin/python3 vpngate_manager.py
 Restart=always
@@ -564,7 +566,7 @@ systemctl restart aimilivpn.service || true
 # Wait and poll for node loading and active connection
 echo -ne "正在加载服务"
 ACTIVE_ID=""
-for i in {1..30}; do
+for i in {1..45}; do
     if [ -f "${INSTALL_DIR}/vpngate_data/state.json" ]; then
         ACTIVE_ID=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('active_openvpn_node_id', ''))" 2>/dev/null || echo "")
         if [ -n "$ACTIVE_ID" ]; then
