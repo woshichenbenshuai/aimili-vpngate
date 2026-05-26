@@ -65,15 +65,17 @@ def ensure_dirs() -> None:
             pass
 
 def write_json(path: Path, data: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    with lock:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
 
 def read_json(path: Path, default: Any) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
+    with lock:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default
 
 import hashlib
 import random
@@ -379,6 +381,17 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
 
+def kill_existing_openvpn_processes() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        # Terminate existing openvpn processes managing tun0 or using our vpngate configuration
+        subprocess.run(["pkill", "-f", "openvpn.*tun0"], capture_output=True, timeout=2)
+        subprocess.run(["pkill", "-f", "openvpn.*vpngate_data"], capture_output=True, timeout=2)
+        print("[Cleanup] Terminated existing AimiliVPN OpenVPN processes.", flush=True)
+    except Exception as e:
+        print(f"[Cleanup Error] Failed to kill existing OpenVPN processes: {e}", flush=True)
+
 def update_handshake_status(line_lower: str) -> None:
     status_map = {
         "resolving": ("解析域名", "正在解析服务器域名与 IP 地址..."),
@@ -518,6 +531,7 @@ def stop_active_openvpn() -> None:
     stop_process(active_openvpn_process)
     active_openvpn_process = None
     active_openvpn_node_id = ""
+    kill_existing_openvpn_processes()
     
     if config_to_delete:
         try:
@@ -565,7 +579,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         raise RuntimeError(f"Failed to write temp config file: {e}")
 
     latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
-    ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev="tun")
+    ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev="tun1")
     
     try:
         if temp_path.exists():
@@ -616,7 +630,8 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         nodes = read_json(NODES_FILE, [])
         to_test = [n for n in nodes if n.get("id") in node_ids]
         
-    def test_worker(n_info: dict[str, Any]) -> dict[str, Any]:
+    def test_worker(args: tuple[int, dict[str, Any]]) -> dict[str, Any]:
+        idx, n_info = args
         node_id = n_info["id"]
         config_file = n_info["config_file"]
         config_text = n_info.get("config_text") or ""
@@ -632,7 +647,8 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
             pass
             
         latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
-        ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev="tun")
+        dev_name = f"tun{idx + 1}"
+        ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
         
         try:
             if temp_path.exists():
@@ -670,7 +686,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
 
     updated_nodes_map = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(to_test))) as executor:
-        futures = {executor.submit(test_worker, n): n["id"] for n in to_test}
+        futures = {executor.submit(test_worker, (idx, n)): n["id"] for idx, n in enumerate(to_test)}
         for future in concurrent.futures.as_completed(futures):
             nid = futures[future]
             try:
@@ -3051,6 +3067,7 @@ class Tee:
 
 def main() -> None:
     ensure_dirs()
+    kill_existing_openvpn_processes()
     
     log_file = DATA_DIR / "vpngate.log"
     tee = Tee(str(log_file))
