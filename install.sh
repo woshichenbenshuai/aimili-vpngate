@@ -41,8 +41,10 @@ GITHUB_REPO="${2:-${DEFAULT_REPO}}"
 
 GITHUB_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git"
 
-echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖 (openvpn, curl, git, iptables...)${PLAIN}"
+echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
+echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
 apt-get update -q || true
+echo -e "  -> 正在运行 apt-get install 安装基础依赖包 (openvpn, curl, git, iptables, iproute2, psmisc, python3)..."
 apt-get install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3
 
 # 4. Clone or pull the repository
@@ -52,20 +54,20 @@ if [ -f "${INSTALL_DIR}/.local_dev" ]; then
     echo -e "${GREEN}检测到本地开发模式 (.local_dev)，跳过 git pull/reset 保持本地修改。${PLAIN}"
 else
     if [ -d "${INSTALL_DIR}" ]; then
-        echo -e "目录 ${INSTALL_DIR} 已存在，正在更新源码..."
+        echo -e "  -> 目录 ${INSTALL_DIR} 已存在，正在更新并强制覆盖本地源码..."
         cd "${INSTALL_DIR}"
         git reset --hard || true
         if git pull; then
-            echo -e "${GREEN}源码更新成功！${PLAIN}"
+            echo -e "${GREEN}  -> 源码更新成功！${PLAIN}"
         else
-            echo -e "${YELLOW}警告: git pull 失败，将保留当前本地源码并继续安装。${PLAIN}"
+            echo -e "${YELLOW}  -> 警告: git pull 失败，将保留当前本地源码并继续安装。${PLAIN}"
         fi
     else
-        echo -e "正在克隆仓库 ${GITHUB_URL} ..."
+        echo -e "  -> 正在克隆 GitHub 仓库 ${GITHUB_URL} ..."
         if git clone "${GITHUB_URL}" "${INSTALL_DIR}"; then
-            echo -e "${GREEN}克隆成功！${PLAIN}"
+            echo -e "${GREEN}  -> 克隆成功！${PLAIN}"
         else
-            echo -e "${RED}错误: 无法克隆仓库 ${GITHUB_URL}，请检查用户名是否正确及 VPS 访问 GitHub 网络！${PLAIN}"
+            echo -e "${RED}  -> 错误: 无法克隆仓库 ${GITHUB_URL}，请检查网络！${PLAIN}"
             exit 1
         fi
     fi
@@ -73,6 +75,7 @@ fi
 
 # 5. Configure Systemd Service (direct python3 run)
 echo -e "\n${YELLOW}[3/4] 正在配置 systemd 系统服务...${PLAIN}"
+echo -e "  -> 正在创建服务配置 /lib/systemd/system/aimilivpn.service ..."
 cat > /lib/systemd/system/aimilivpn.service <<EOF
 [Unit]
 Description=AimiliVPN OpenVPN Manager with HTTP/SOCKS5 Proxy
@@ -90,11 +93,13 @@ EnvironmentFile=-/etc/default/aimilivpn
 WantedBy=multi-user.target
 EOF
 
+echo -e "  -> 正在重新加载 systemd 系统服务列表并启用开机自启..."
 systemctl daemon-reload
 systemctl enable aimilivpn.service
 
 # 6. Configure global command shortcut "ml"
 echo -e "\n${YELLOW}[4/4] 正在创建全局命令快捷接口 'ml'...${PLAIN}"
+echo -e "  -> 正在写入管理脚本 /usr/bin/ml ..."
 cat > /usr/bin/ml <<'EOF'
 #!/usr/bin/env python3
 import sys
@@ -266,6 +271,24 @@ def get_service_pid(service_name="aimilivpn.service"):
         pass
     return None
 
+def get_display_width(s):
+    import re
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[mGKH]')
+    s_clean = ansi_escape.sub('', s)
+    width = 0
+    for char in s_clean:
+        if ord(char) > 127:
+            width += 2
+        else:
+            width += 1
+    return width
+
+def format_line(label, value, target_width=26):
+    prefix = "  ● "
+    w = get_display_width(label)
+    padding = " " * max(0, target_width - w)
+    return f"{prefix}{label}{padding}:  {value}"
+
 def print_status():
     cfg = load_ui_cfg()
     ui_port = cfg.get("port", 8787)
@@ -291,7 +314,7 @@ def print_status():
     backend_status = f"{green}[已激活] (PID: {pid}){reset}" if (service_ok and pid) else f"{red}[未启动]{reset}"
     
     if is_connecting:
-        openvpn_status = f"{yellow}[连接中/加载服务...]{reset}"
+        openvpn_status = f"{yellow}[{state.get('active_node_latency') or '连接中'}...]{reset}"
     else:
         openvpn_status = f"{green}[已连接]{reset}" if openvpn_ok else f"{red}[未连接]{reset}"
     
@@ -299,22 +322,23 @@ def print_status():
     print(f"               {bold}AimiliVPN 管理终端 v2.0{reset}                  ")
     print("=======================================================")
     print("【核心服务状态】")
-    print(f"  ● 代理网关 (Port 7928)    :  {gateway_status}")
-    print(f"  ● 管理后台 (Port {ui_port})    :  {backend_status}")
-    print(f"  ● 连接核心 (OpenVPN)       :  {openvpn_status}")
+    print(format_line("代理网关 (Port 7928)", gateway_status))
+    print(format_line(f"管理后台 (Port {ui_port})", backend_status))
+    print(format_line("连接核心 (OpenVPN)", openvpn_status))
     
     login_ip = "127.0.0.1" if cfg.get("host") == "127.0.0.1" else get_public_ip()
-    print(f"  ● 网页登录地址            :  {yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}")
+    print(format_line("网页登录地址", f"{yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}"))
     print()
     print("【活动节点状态】")
     if is_connecting:
-        print(f"  ● 节点状态                 :  {yellow}正在连接到节点 {state.get('active_openvpn_node_id') or ''} (加载服务中...){reset}")
+        connecting_msg = state.get('last_check_message') or '正在建立加密隧道并验证路由规则...'
+        print(format_line("节点状态", f"{yellow}{connecting_msg}{reset}"))
     elif active_ip:
-        print(f"  ● 节点 IP                 :  {active_ip}")
-        print(f"  ● 节点地区                 :  {active_loc}")
-        print(f"  ● 节点延迟 (直连测试)     :  {latency}")
+        print(format_line("节点 IP", active_ip))
+        print(format_line("节点地区", active_loc))
+        print(format_line("节点延迟 (直连测试)", latency))
     else:
-        print("  ● 节点状态                 :  无活动连接")
+        print(format_line("节点状态", "无活动连接"))
     print()
     print("【使用方法】")
     print(f"  export http_proxy=socks5://127.0.0.1:7928")
@@ -595,21 +619,38 @@ echo -e "\n正在启动 AimiliVPN 服务并初始化网络..."
 systemctl restart aimilivpn.service || true
 
 # Wait and poll for node loading and active connection
-echo -ne "正在加载服务"
+echo -e "\n正在等待 AimiliVPN 首次获取节点并建立加密通道 (此过程可能需要 5-30 秒)..."
 ACTIVE_ID=""
-for i in {1..45}; do
+LAST_MSG=""
+for i in {1..90}; do
     if [ -f "${INSTALL_DIR}/vpngate_data/state.json" ]; then
         ACTIVE_ID=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('active_openvpn_node_id', ''))" 2>/dev/null || echo "")
-        if [ -n "$ACTIVE_ID" ]; then
-            echo -e " [${GREEN}已就绪${PLAIN}]"
-            break
+        IS_CONN=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('is_connecting', False))" 2>/dev/null || echo "False")
+        CUR_MSG=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('last_check_message', ''))" 2>/dev/null || echo "")
+        
+        if [ "$IS_CONN" = "False" ] || [ "$IS_CONN" = "false" ]; then
+            if [ -n "$ACTIVE_ID" ]; then
+                echo -e "  -> ${GREEN}[已就绪]${PLAIN} 首次节点连接成功，活动节点: ${GREEN}$ACTIVE_ID${PLAIN}"
+                break
+            else
+                if [ -n "$CUR_MSG" ] && [ "$CUR_MSG" != "$LAST_MSG" ]; then
+                    echo -e "  -> 提示: ${YELLOW}${CUR_MSG}${PLAIN}"
+                    LAST_MSG="$CUR_MSG"
+                fi
+            fi
+        else
+            if [ -n "$CUR_MSG" ] && [ "$CUR_MSG" != "$LAST_MSG" ]; then
+                echo -e "  -> 状态: ${YELLOW}${CUR_MSG}${PLAIN}"
+                LAST_MSG="$CUR_MSG"
+            fi
         fi
+    else
+        echo -n "."
     fi
-    echo -n "."
     sleep 1
 done
 if [ -z "$ACTIVE_ID" ]; then
-    echo -e " [${YELLOW}加载超时，将在后台继续连接${PLAIN}]"
+    echo -e "  -> ${YELLOW}[加载超时]${PLAIN} 首次节点获取或连接超时，将在后台继续尝试..."
 fi
 
 SECRET_PATH="EJsW2EeBo9lY"

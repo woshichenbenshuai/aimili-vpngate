@@ -379,6 +379,24 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
 
+def update_handshake_status(line_lower: str) -> None:
+    status_map = {
+        "resolving": ("解析域名", "正在解析服务器域名与 IP 地址..."),
+        "udp link local": ("物理连接", "已创建本地套接字，开始尝试发送数据包..."),
+        "tcp link local": ("物理连接", "已创建本地套接字，开始尝试发送数据包..."),
+        "tls: initial packet": ("证书握手", "已成功发送首包，正在与远程服务器建立 TLS 安全通道..."),
+        "verify ok": ("证书校验", "服务器证书校验成功，正在进行身份验证..."),
+        "peer connection initiated": ("协商加密", "控制通道已建立，已初始化与服务器的加密对等连接..."),
+        "push_request": ("请求配置", "正在向服务器发送 PUSH_REQUEST 请求配置参数与 IP 分配..."),
+        "push_reply": ("应用配置", "已接收服务器 PUSH_REPLY，获取到 IP 分配，正在准备配置网卡..."),
+        "tun/tap device": ("创建网卡", "正在创建虚拟通道并打开 TUN 虚拟网卡设备..."),
+        "do_ifconfig": ("网卡配置", "正在为虚拟网卡配置 IP 地址及相关网络属性..."),
+    }
+    for key, (short_status, detailed_desc) in status_map.items():
+        if key in line_lower:
+            set_state(active_node_latency=short_status, last_check_message=detailed_desc)
+            break
+
 def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bool, timeout: int | None = None, dev: str = "tun0") -> tuple[bool, str, subprocess.Popen[str] | None]:
     limit = timeout if timeout is not None else OPENVPN_TEST_TIMEOUT_SECONDS
     try:
@@ -430,6 +448,8 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
             if keep_alive:
                 print(f"[OpenVPN] {line}", flush=True)
         lower = line.lower()
+        if keep_alive:
+            update_handshake_status(lower)
         if "initialization sequence completed" in lower:
             ok = True
             message = f"OpenVPN connected in {int((time.time() - started) * 1000)} ms."
@@ -450,6 +470,7 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
         stop_process(process)
         process = None
     return ok, message, process
+
 
 def setup_policy_routing(interface: str = "tun0") -> None:
     try:
@@ -725,7 +746,7 @@ def connect_node(node_id: str) -> str:
             print("[连接] 正在建立其他连接中，跳过此请求", flush=True)
             return "Already connecting"
         is_connecting = True
-        set_state(active_openvpn_node_id=node_id, is_connecting=True, active_node_latency="测试中...", last_check_message=f"Connecting to {node_id}")
+        set_state(active_openvpn_node_id=node_id, is_connecting=True, active_node_latency="正在连接", last_check_message="正在初始化连接配置...")
         
     try:
         log_to_json("INFO", "VPN", f"开始连接节点: {node_id}")
@@ -733,8 +754,11 @@ def connect_node(node_id: str) -> str:
         node = next((item for item in nodes if item.get("id") == node_id), None)
         if not node:
             raise ValueError(f"Node not found: {node_id}")
+        
+        set_state(active_node_latency="清理连接", last_check_message="正在关闭与清理旧的 VPN 连接及网卡...")
         stop_active_openvpn()
 
+        set_state(active_node_latency="写入配置", last_check_message="正在写入 OpenVPN 节点配置文件...")
         config_path = Path(node["config_file"])
         try:
             CONFIG_DIR.mkdir(exist_ok=True, parents=True)
@@ -742,6 +766,7 @@ def connect_node(node_id: str) -> str:
         except Exception as e:
             raise RuntimeError(f"Failed to write configuration: {e}")
 
+        set_state(active_node_latency="启动核心", last_check_message="正在启动 OpenVPN Core 核心服务并建立连接...")
         ok, message, process = run_openvpn_until_ready(str(node["config_file"]), keep_alive=True, route_nopull=True)
         if not ok or process is None:
             try:
@@ -760,11 +785,15 @@ def connect_node(node_id: str) -> str:
             
         active_openvpn_process = process
         active_openvpn_node_id = node_id
+        
+        set_state(active_node_latency="配置路由", last_check_message="正在配置策略路由规则与流量转发...")
         setup_policy_routing("tun0")
         
         global last_active_ping_time, last_active_latency
         last_active_ping_time = time.time()
         last_active_latency = 0
+        
+        set_state(active_node_latency="测试延迟", last_check_message="正在直连测试代理出口延迟与可用性...")
         try:
             ip = node.get("ip") or node.get("remote_host")
             port = parse_int(node.get("remote_port"))
@@ -2192,10 +2221,10 @@ function render(){
           <div class="active-card-details">
             <div class="active-card-title" style="color: var(--text-primary);">
               <span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);"><span class="badge-pulse" style="background: #f59e0b;"></span>正在连接</span>
-              <strong>正在加载服务...</strong>
+              <strong>${esc(state.active_node_latency || '正在连接...')}</strong>
             </div>
             <div class="active-card-meta" style="margin-top: 4px;">
-              正在与 VPN 节点建立加密隧道并验证路由规则，请稍候（通常需要 5-15 秒）...
+              ${esc(state.last_check_message || '正在与 VPN 节点建立加密隧道，请稍候...')}
             </div>
           </div>
         </div>
@@ -2397,7 +2426,33 @@ let pollInterval = null;
 async function connectNode(id){
   state.is_connecting = true;
   state.active_openvpn_node_id = id;
+  state.active_node_latency = "正在连接";
+  state.last_check_message = "正在发送连接请求...";
   render();
+  
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
+    try {
+      const resp = await fetch("./api/nodes");
+      const data = await resp.json();
+      nodes = data.nodes || [];
+      state = data.state || {};
+      render();
+      
+      if (!state.is_connecting) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+        try {
+          await fetch("./api/test_proxy", { method: "POST" });
+        } catch(pe){}
+        location.reload();
+      }
+    } catch(pe) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+      location.reload();
+    }
+  }, 1000);
   
   try {
     const r = await fetch("./api/connect",{
@@ -2408,37 +2463,20 @@ async function connectNode(id){
     const result = await r.json();
     if (!result.ok) {
       alert("连接失败: " + (result.error || "未知错误"));
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
       state.is_connecting = false;
       render();
       return;
     }
-    
-    if (pollInterval) clearInterval(pollInterval);
-    pollInterval = setInterval(async () => {
-      try {
-        const resp = await fetch("./api/nodes");
-        const data = await resp.json();
-        nodes = data.nodes || [];
-        state = data.state || {};
-        render();
-        
-        if (!state.is_connecting) {
-          clearInterval(pollInterval);
-          pollInterval = null;
-          try {
-            await fetch("./api/test_proxy", { method: "POST" });
-          } catch(pe){}
-          location.reload();
-        }
-      } catch(pe) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-        location.reload();
-      }
-    }, 1500);
-    
   } catch(e) {
     alert("连接请求错误");
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
     state.is_connecting = false;
     render();
   }

@@ -37,3 +37,4 @@ if __name__ == "__main__":
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
     run_commands(config["host"], config["port"], config["username"], config["password"], commands)
+
