@@ -6,9 +6,9 @@ Bilingual: [中文](#中文) | [English](#english)
 
 ## 中文
 
-TG交流群：[t.me/arestemple](https://t.me/arestemple)  
-交流网站：[339936.xyz](https://339936.xyz)  
-Bug反馈邮箱：`yaohunse7@gmail.com`  
+[![Telegram](https://img.shields.io/badge/TG交流群-arestemple-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/arestemple)
+[![Forum](https://img.shields.io/badge/交流论坛-339936.xyz-orange?style=flat-square&logo=discourse&logoColor=white)](https://339936.xyz)
+[![Email](https://img.shields.io/badge/Bug反馈-yaohunse7@gmail.com-red?style=flat-square&logo=gmail&logoColor=white)](mailto:yaohunse7@gmail.com)
 
 ---
 
@@ -83,9 +83,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 
 ## English
 
-TG Group: [t.me/arestemple](https://t.me/arestemple)  
-Forum/Website: [339936.xyz](https://339936.xyz)  
-Bug Feedback Email: `yaohunse7@gmail.com`  
+[![Telegram](https://img.shields.io/badge/Telegram-arestemple-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/arestemple)
+[![Forum](https://img.shields.io/badge/Forum-339936.xyz-orange?style=flat-square&logo=discourse&logoColor=white)](https://339936.xyz)
+[![Email](https://img.shields.io/badge/Bug%20Report-yaohunse7@gmail.com-red?style=flat-square&logo=gmail&logoColor=white)](mailto:yaohunse7@gmail.com)
 
 ---
 
