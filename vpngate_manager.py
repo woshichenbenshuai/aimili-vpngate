@@ -124,7 +124,7 @@ def load_ui_config() -> dict[str, Any]:
             "username": "",
             "secret_path": "EJsW2EeBo9lY",
             "password": "",
-            "host": "127.0.0.1",
+            "host": UI_HOST,
             "port": 6379
         }
         updated = False

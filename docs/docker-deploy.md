@@ -33,16 +33,17 @@ docker exec aimilivpn python -c "import json;print(json.dumps(json.load(open('/d
 
 ## Access Web UI
 
-The Web UI listens on `127.0.0.1:6379` by default. Use an SSH tunnel from your computer:
-
-```bash
-ssh -N -L 6379:127.0.0.1:6379 root@YOUR_SERVER_IP
-```
-
-Open:
+The Web UI listens on `0.0.0.0:6379` by default in Docker, so you can open it from your browser with the server IP:
 
 ```text
-http://127.0.0.1:6379/SECRET_PATH/
+http://YOUR_SERVER_IP:6379/SECRET_PATH/
+```
+
+If an existing `vpngate_data/ui_auth.json` was created before this change, update its `host` value to `0.0.0.0` and restart the container:
+
+```bash
+docker exec aimilivpn python -c "import json;p='/data/ui_auth.json';d=json.load(open(p));d['host']='0.0.0.0';open(p,'w').write(json.dumps(d,ensure_ascii=False,indent=2))"
+docker restart aimilivpn
 ```
 
 ## Use The Proxy
