@@ -69,16 +69,39 @@ ACCEPTED_EXIT_IP_TYPES = {
 PUBLICVPNLIST_COUNTRY_SLUGS = {
     "Korea Republic of": "south-korea",
     "Korea": "south-korea",
+    "South Korea": "south-korea",
     "Republic of Korea": "south-korea",
     "Russian Federation": "russia",
     "Russian": "russia",
     "United States": "usa",
+    "USA": "usa",
+    "US": "usa",
     "United Kingdom": "united-kingdom",
+    "UK": "united-kingdom",
     "Viet Nam": "vietnam",
     "Taiwan Province of China": "taiwan",
     "United Arab Emirates": "united-arab-emirates",
     "UAE": "united-arab-emirates",
     "Czech Republic": "czech-republic",
+}
+
+COUNTRY_DISPLAY_ALIASES = {
+    "Belarus": "白俄罗斯",
+    "Peru": "秘鲁",
+    "South Korea": "韩国",
+    "USA": "美国",
+    "US": "美国",
+    "UK": "英国",
+    "Czechia": "捷克",
+    "Moldova": "摩尔多瓦",
+    "Serbia": "塞尔维亚",
+    "Slovakia": "斯洛伐克",
+    "Slovenia": "斯洛文尼亚",
+    "Croatia": "克罗地亚",
+    "Bulgaria": "保加利亚",
+    "Lithuania": "立陶宛",
+    "Latvia": "拉脱维亚",
+    "Estonia": "爱沙尼亚",
 }
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
@@ -377,7 +400,7 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     config_path = CONFIG_DIR / f"{node_id}.ovpn"
     
     country_long = row.get("CountryLong", "")
-    country_zh = vpn_utils.COUNTRY_TRANSLATIONS.get(country_long, vpn_utils.COUNTRY_TRANSLATIONS.get(country_long.strip(), country_long))
+    country_zh = country_display_name(country_long) or country_long
     return {
         "id": node_id,
         "source": "vpngate",
@@ -433,18 +456,34 @@ def normalize_country_key(value: Any) -> str:
     text = str(value or "").strip().casefold()
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
 
+def has_cjk_text(value: Any) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(value or "")))
+
+def country_display_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    direct = COUNTRY_DISPLAY_ALIASES.get(raw) or vpn_utils.COUNTRY_TRANSLATIONS.get(raw)
+    if direct:
+        return str(direct)
+    raw_key = normalize_country_key(raw)
+    for english, display in {**vpn_utils.COUNTRY_TRANSLATIONS, **COUNTRY_DISPLAY_ALIASES}.items():
+        if raw_key == normalize_country_key(english) or raw_key == normalize_country_key(display):
+            return str(display)
+    return raw if has_cjk_text(raw) else ""
+
 def country_match_keys(value: Any) -> set[str]:
     raw = str(value or "").strip()
     if not raw:
         return set()
 
     values = {raw, raw.replace("_", " "), raw.replace("-", " ")}
-    translated = vpn_utils.COUNTRY_TRANSLATIONS.get(raw)
+    translated = country_display_name(raw)
     if translated:
         values.add(translated)
 
     raw_key = normalize_country_key(raw)
-    for english, display in vpn_utils.COUNTRY_TRANSLATIONS.items():
+    for english, display in {**vpn_utils.COUNTRY_TRANSLATIONS, **COUNTRY_DISPLAY_ALIASES}.items():
         if raw_key in {normalize_country_key(english), normalize_country_key(display)}:
             values.add(english)
             values.add(display)
@@ -468,7 +507,7 @@ def publicvpnlist_country_slug(country_filter: str | None) -> str:
         return ""
 
     raw_key = normalize_country_key(raw)
-    for english, display in vpn_utils.COUNTRY_TRANSLATIONS.items():
+    for english, display in {**vpn_utils.COUNTRY_TRANSLATIONS, **COUNTRY_DISPLAY_ALIASES}.items():
         if raw_key in {normalize_country_key(english), normalize_country_key(display)}:
             return PUBLICVPNLIST_COUNTRY_SLUGS.get(english, re.sub(r"[^a-z0-9]+", "-", english.lower()).strip("-"))
 
@@ -504,15 +543,14 @@ def publicvpnlist_country_urls(country_filter: str | None, home_html: str) -> li
 
 def known_country_options() -> list[str]:
     countries: dict[str, str] = {}
-    for english, translated in vpn_utils.COUNTRY_TRANSLATIONS.items():
-        display = str(translated or english).strip()
-        if display:
+    for value in list(vpn_utils.COUNTRY_TRANSLATIONS.keys()) + list(COUNTRY_DISPLAY_ALIASES.keys()):
+        display = country_display_name(value)
+        if display and has_cjk_text(display):
             countries.setdefault(normalize_country_key(display), display)
     for node in cached_nodes():
-        display = str(node.get("country") or "").strip()
-        translated = vpn_utils.COUNTRY_TRANSLATIONS.get(display, display)
-        if translated:
-            countries.setdefault(normalize_country_key(translated), translated)
+        display = country_display_name(node.get("country"))
+        if display and has_cjk_text(display):
+            countries.setdefault(normalize_country_key(display), display)
     return sorted(countries.values())
 
 def parse_publicvpnlist_entries(html: str) -> list[dict[str, Any]]:
@@ -552,7 +590,7 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict
     ip = str(entry.get("ip") or entry.get("host") or "")
     country_name = str(entry.get("country") or "")
     country_code = str(entry.get("code") or "").upper().replace("-", "_")
-    country_display = vpn_utils.COUNTRY_TRANSLATIONS.get(country_name, country_name or country_code)
+    country_display = country_display_name(country_name) or country_display_name(country_code) or country_name or country_code
     remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, ip)
     node_id = safe_name("_".join(["PVL", country_code or "XX", ip or remote_host, str(remote_port), proto]))
     config_path = CONFIG_DIR / f"{node_id}.ovpn"
@@ -2571,12 +2609,30 @@ const translateCountry = c => {
     "Macao": "澳门",
     "Macau": "澳门",
     "Iceland": "冰岛",
-    "Luxembourg": "卢森堡"
+    "Luxembourg": "卢森堡",
+    "Belarus": "白俄罗斯",
+    "Peru": "秘鲁",
+    "South Korea": "韩国",
+    "USA": "美国",
+    "US": "美国",
+    "UK": "英国",
+    "Czechia": "捷克",
+    "Moldova": "摩尔多瓦",
+    "Serbia": "塞尔维亚",
+    "Slovakia": "斯洛伐克",
+    "Slovenia": "斯洛文尼亚",
+    "Croatia": "克罗地亚",
+    "Bulgaria": "保加利亚",
+    "Lithuania": "立陶宛",
+    "Latvia": "拉脱维亚",
+    "Estonia": "爱沙尼亚"
   };
   return dict[c] || c || "-";
 };
 
 let sourceCountryOptions = [];
+
+const isChineseCountryName = c => /[\u4e00-\u9fff]/.test(String(c || ""));
 
 const translateStatus = s => {
   const dict = {"available": "可用", "unavailable": "不可用", "not_checked": "待检测"};
@@ -2593,8 +2649,8 @@ function getLatencyClass(ms) {
 function updateCountryFilter() {
   const select = $("country_filter");
   const selectedValue = select.value;
-  const countrySet = new Set(sourceCountryOptions.map(translateCountry).filter(Boolean));
-  nodes.map(n => translateCountry(n.country)).filter(Boolean).forEach(c => countrySet.add(c));
+  const countrySet = new Set(sourceCountryOptions.map(translateCountry).filter(isChineseCountryName));
+  nodes.map(n => translateCountry(n.country)).filter(isChineseCountryName).forEach(c => countrySet.add(c));
   const countries = Array.from(countrySet).sort();
   
   const currentOptions = Array.from(select.options).map(o => o.value).filter(Boolean);
