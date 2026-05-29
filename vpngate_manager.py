@@ -2339,6 +2339,7 @@ let nodes=[], state={}, testingNodeIds = new Set();
 let currentPage = 1;
 const pageSize = 11;
 let currentPageNodes = [];
+let nodesRefreshInFlight = null;
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
@@ -2825,18 +2826,22 @@ $("btn_batch_test").onclick = async () => {
 };
 
 async function load(){
-  const r=await fetch("./api/nodes"); 
-  const d=await r.json(); 
-  nodes=d.nodes||[]; 
-  state=d.state||{}; 
-  
-  stableSortNodes();
-  updateCountryFilter();
-  render();
+  if (nodesRefreshInFlight) return nodesRefreshInFlight;
+  nodesRefreshInFlight = (async () => {
+    const r=await fetch("./api/nodes");
+    const d=await r.json();
+    nodes=d.nodes||[];
+    state=d.state||{};
 
-  if (state.is_connecting) {
-    startConnectionPolling();
-  }
+    stableSortNodes();
+    updateCountryFilter();
+    render();
+
+    if (state.is_connecting) {
+      startConnectionPolling();
+    }
+  })();
+  return nodesRefreshInFlight.finally(() => { nodesRefreshInFlight = null; });
 }
 
 $("search").oninput=()=>{ currentPage = 1; render(); };
@@ -2977,19 +2982,14 @@ async function logoutAdmin() {
 // 页面加载时自动初始化数据
 load();
 
-// 每 10 秒在前台空闲时自动更新节点与状态，无需手动刷新页面
+// 每 60 秒在前台空闲时自动更新节点与状态，避免频繁请求 /api/nodes
 setInterval(async () => {
-  if (typeof state !== "undefined" && !state.is_connecting && (!testingNodeIds || !testingNodeIds.size) && document.visibilityState === "visible") {
+  if (typeof state !== "undefined" && !state.is_connecting && (!testingNodeIds || !testingNodeIds.size) && document.visibilityState === "visible" && !nodesRefreshInFlight) {
     try {
-      const r = await fetch("./api/nodes");
-      const d = await r.json();
-      nodes = d.nodes || [];
-      state = d.state || {};
-      stableSortNodes();
-      render();
+      await load();
     } catch(e) {}
   }
-}, 10000);
+}, 60000);
 </script>
 </body></html>"""
 
