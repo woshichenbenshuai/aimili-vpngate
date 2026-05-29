@@ -502,6 +502,19 @@ def publicvpnlist_country_urls(country_filter: str | None, home_html: str) -> li
             urls.append(url)
     return urls
 
+def known_country_options() -> list[str]:
+    countries: dict[str, str] = {}
+    for english, translated in vpn_utils.COUNTRY_TRANSLATIONS.items():
+        display = str(translated or english).strip()
+        if display:
+            countries.setdefault(normalize_country_key(display), display)
+    for node in cached_nodes():
+        display = str(node.get("country") or "").strip()
+        translated = vpn_utils.COUNTRY_TRANSLATIONS.get(display, display)
+        if translated:
+            countries.setdefault(normalize_country_key(translated), translated)
+    return sorted(countries.values())
+
 def parse_publicvpnlist_entries(html: str) -> list[dict[str, Any]]:
     pattern = re.compile(
         r'href="/download/(?P<id>\d+)/"[^>]*data-download-country="(?P<country>[^"]*)"[^>]*'
@@ -2563,17 +2576,7 @@ const translateCountry = c => {
   return dict[c] || c || "-";
 };
 
-const SOURCE_COUNTRY_OPTIONS = [
-  "Japan", "Korea Republic of", "Thailand", "United States", "United Kingdom",
-  "Russian Federation", "Viet Nam", "Taiwan", "Hong Kong", "Singapore",
-  "Malaysia", "Indonesia", "India", "Philippines", "Australia", "New Zealand",
-  "Canada", "Ukraine", "France", "Germany", "Netherlands", "Sweden", "Norway",
-  "Spain", "Turkey", "South Africa", "Brazil", "Argentina", "Chile", "Mexico",
-  "Egypt", "Romania", "Poland", "Kazakhstan", "Georgia", "Mongolia",
-  "Saudi Arabia", "Iran", "Iraq", "Colombia", "Cambodia", "Ireland", "Italy",
-  "Switzerland", "Belgium", "Austria", "Denmark", "Finland", "Portugal",
-  "Greece", "Czech Republic", "Hungary", "Israel", "United Arab Emirates"
-];
+let sourceCountryOptions = [];
 
 const translateStatus = s => {
   const dict = {"available": "可用", "unavailable": "不可用", "not_checked": "待检测"};
@@ -2590,7 +2593,7 @@ function getLatencyClass(ms) {
 function updateCountryFilter() {
   const select = $("country_filter");
   const selectedValue = select.value;
-  const countrySet = new Set(SOURCE_COUNTRY_OPTIONS.map(translateCountry).filter(Boolean));
+  const countrySet = new Set(sourceCountryOptions.map(translateCountry).filter(Boolean));
   nodes.map(n => translateCountry(n.country)).filter(Boolean).forEach(c => countrySet.add(c));
   const countries = Array.from(countrySet).sort();
   
@@ -2970,6 +2973,7 @@ $("btn_batch_test").onclick = async () => {
 async function load(){
   if (nodesRefreshInFlight) return nodesRefreshInFlight;
   nodesRefreshInFlight = (async () => {
+    await loadCountryOptions();
     const r=await fetch("./api/nodes");
     const d=await r.json();
     nodes=d.nodes||[];
@@ -2984,6 +2988,15 @@ async function load(){
     }
   })();
   return nodesRefreshInFlight.finally(() => { nodesRefreshInFlight = null; });
+}
+
+async function loadCountryOptions(){
+  if (sourceCountryOptions.length) return;
+  try {
+    const r = await fetch("./api/countries");
+    const d = await r.json();
+    sourceCountryOptions = d.countries || [];
+  } catch(e) {}
 }
 
 $("search").oninput=()=>{ currentPage = 1; render(); };
@@ -3424,6 +3437,8 @@ class Handler(BaseHTTPRequestHandler):
                     del stripped["config_text"]
                 stripped_nodes.append(stripped)
             self.send_json({"nodes": stripped_nodes, "state": get_state()})
+        elif effective_path == "/api/countries":
+            self.send_json({"countries": known_country_options()})
         elif effective_path.startswith("/configs/"):
             filename = urllib.parse.unquote(effective_path.removeprefix("/configs/"))
             with lock:
