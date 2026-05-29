@@ -364,6 +364,7 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     country_zh = vpn_utils.COUNTRY_TRANSLATIONS.get(country_long, vpn_utils.COUNTRY_TRANSLATIONS.get(country_long.strip(), country_long))
     return {
         "id": node_id,
+        "source": "vpngate",
         "country": country_zh,
         "country_short": country_short,
         "host_name": row.get("HostName", ""),
@@ -2213,6 +2214,7 @@ INDEX_HTML = r"""<!doctype html>
           <tr>
             <th style="width: 110px;">状态</th>
             <th style="width: 100px;">延迟</th>
+            <th style="width: 130px;">来源</th>
             <th style="width: 220px;">IP 地址 : 端口</th>
             <th>物理位置</th>
             <th style="width: 100px;">ASN</th>
@@ -2328,6 +2330,13 @@ const translateIpType = t => {
   return dict[t] || t || "-";
 };
 
+const translateSource = s => {
+  const normalized = String(s || "").toLowerCase();
+  if (normalized === "publicvpnlist") return "PublicVPNList";
+  if (normalized === "vpngate") return "VPNGate";
+  return s || "VPNGate";
+};
+
 const translateCountry = c => {
   const dict = {
     "Japan": "日本",
@@ -2440,7 +2449,7 @@ function getFilteredNodes() {
     }
     const searchStr = [
       n.country, n.country_short, n.ip, n.remote_host, n.proto,
-      translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
+      translateSource(n.source), translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
     ].join(" ").toLowerCase();
     return searchStr.includes(q);
   });
@@ -2515,6 +2524,7 @@ function render(){
               <span style="margin-left: 12px;">延时: <strong>${latencyText}</strong></span>
               <span style="margin-left: 12px;">运营主体: <strong>${esc(activeNode.owner || activeNode.as_name || "-")}</strong></span>
               <span style="margin-left: 12px;">IP 类型: <strong>${esc(translateIpType(activeNode.ip_type))}</strong></span>
+              <span style="margin-left: 12px;">来源: <strong>${esc(translateSource(activeNode.source))}</strong></span>
             </div>
           </div>
         </div>
@@ -2588,6 +2598,7 @@ function render(){
       return `<tr ${rowClass}>
         <td><span class="badge ${badgeClass}">${badgeText}</span></td>
         <td>${latencyText}</td>
+        <td><span class="badge not_checked">${esc(translateSource(n.source))}</span></td>
         <td class="mono">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
         <td>${esc(displayLocation)}</td>
         <td class="mono" style="font-size:12px; color:var(--text-secondary);">${esc(n.asn||"-")}</td>
