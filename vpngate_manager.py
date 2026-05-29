@@ -3489,39 +3489,46 @@ class Handler(BaseHTTPRequestHandler):
         if effective_path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif effective_path == "/api/nodes":
-            global last_active_ping_time, last_active_latency, active_openvpn_node_id
-            nodes = read_json(NODES_FILE, [])
-            active_node = next((n for n in nodes if active_openvpn_node_id and n.get("id") == active_openvpn_node_id), None)
-            for n in nodes:
-                n["active"] = (active_openvpn_node_id and n.get("id") == active_openvpn_node_id)
-            if active_node:
-                ip = active_node.get("ip") or active_node.get("remote_host")
-                if ip:
-                    now = time.time()
-                    if now - last_active_ping_time > 15.0:
-                        last_active_ping_time = now
-                        def bg_ping(ip_addr: str, port: int, fallback: int) -> None:
-                            global last_active_latency
-                            try:
-                                latency = vpn_utils.ping_latency_ms(ip_addr, port, fallback)
-                                if latency > 0:
-                                    last_active_latency = latency
-                            except Exception:
-                                pass
-                        threading.Thread(
-                            target=bg_ping, 
-                            args=(ip, parse_int(active_node.get("remote_port")), parse_int(active_node.get("ping"))),
-                            daemon=True
-                        ).start()
-                    if last_active_latency > 0:
-                        active_node["latency_ms"] = last_active_latency
-            stripped_nodes = []
-            for n in nodes:
-                stripped = n.copy()
-                if "config_text" in stripped:
-                    del stripped["config_text"]
-                stripped_nodes.append(stripped)
-            self.send_json({"nodes": stripped_nodes, "state": get_state()})
+            try:
+                global last_active_ping_time, last_active_latency, active_openvpn_node_id
+                nodes = read_json(NODES_FILE, [])
+                active_node = next((n for n in nodes if active_openvpn_node_id and n.get("id") == active_openvpn_node_id), None)
+                if active_node:
+                    ip = active_node.get("ip") or active_node.get("remote_host")
+                    if ip:
+                        now = time.time()
+                        if now - last_active_ping_time > 15.0:
+                            last_active_ping_time = now
+                            def bg_ping(ip_addr: str, port: int, fallback: int) -> None:
+                                global last_active_latency
+                                try:
+                                    latency = vpn_utils.ping_latency_ms(ip_addr, port, fallback)
+                                    if latency > 0:
+                                        last_active_latency = latency
+                                except Exception:
+                                    pass
+                            threading.Thread(
+                                target=bg_ping,
+                                args=(ip, parse_int(active_node.get("remote_port")), parse_int(active_node.get("ping"))),
+                                daemon=True
+                            ).start()
+                stripped_nodes = []
+                for n in nodes:
+                    stripped = n.copy() if isinstance(n, dict) else {"id": str(n)}
+                    stripped.pop("config_text", None)
+                    stripped["active"] = bool(active_openvpn_node_id and stripped.get("id") == active_openvpn_node_id)
+                    if stripped["active"] and last_active_latency > 0:
+                        stripped["latency_ms"] = last_active_latency
+                    stripped_nodes.append(stripped)
+                self.send_json({"nodes": stripped_nodes, "state": get_state()})
+            except Exception as exc:
+                print(f"[api/nodes] error: {exc}", flush=True)
+                log_to_json("ERROR", "UI", f"/api/nodes failed: {exc}")
+                try:
+                    state = get_state()
+                except Exception:
+                    state = {"last_check_message": "/api/nodes failed"}
+                self.send_json({"nodes": [], "state": state, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/countries":
             self.send_json({"countries": known_country_options()})
         elif effective_path.startswith("/configs/"):
