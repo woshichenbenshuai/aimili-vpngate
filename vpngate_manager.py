@@ -1697,7 +1697,8 @@ INDEX_HTML = r"""<!doctype html>
 
     main {
       padding: 24px 32px;
-      max-width: 1400px;
+      max-width: 1800px;
+      width: calc(100vw - 64px);
       margin: 0 auto;
     }
 
@@ -1844,12 +1845,12 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     .table-container {
-      overflow-x: auto;
+      overflow-x: visible;
     }
 
     table {
-      width: max-content;
-      min-width: 1180px;
+      width: 100%;
+      min-width: 0;
       border-collapse: collapse;
       text-align: left;
       table-layout: fixed;
@@ -1875,16 +1876,16 @@ INDEX_HTML = r"""<!doctype html>
       white-space: nowrap;
     }
 
-    th:nth-child(1), td:nth-child(1) { width: 96px; }
-    th:nth-child(2), td:nth-child(2) { width: 82px; }
-    th:nth-child(3), td:nth-child(3) { width: 118px; }
-    th:nth-child(4), td:nth-child(4) { width: 190px; white-space: nowrap; }
-    th:nth-child(5), td:nth-child(5) { width: 170px; min-width: 170px; overflow-wrap: normal; }
-    th:nth-child(6), td:nth-child(6) { width: 150px; }
-    th:nth-child(7), td:nth-child(7) { width: 210px; }
-    th:nth-child(8), td:nth-child(8) { width: 96px; }
-    th:nth-child(9), td:nth-child(9) { width: 100px; }
-    th:nth-child(10), td:nth-child(10) { width: 130px; }
+    th:nth-child(1), td:nth-child(1) { width: 7%; }
+    th:nth-child(2), td:nth-child(2) { width: 6%; }
+    th:nth-child(3), td:nth-child(3) { width: 9%; }
+    th:nth-child(4), td:nth-child(4) { width: 16%; white-space: nowrap; }
+    th:nth-child(5), td:nth-child(5) { width: 16%; overflow-wrap: normal; }
+    th:nth-child(6), td:nth-child(6) { width: 10%; }
+    th:nth-child(7), td:nth-child(7) { width: 16%; }
+    th:nth-child(8), td:nth-child(8) { width: 7%; }
+    th:nth-child(9), td:nth-child(9) { width: 7%; }
+    th:nth-child(10), td:nth-child(10) { width: 6%; }
 
     tr {
       transition: background 0.2s ease;
@@ -2060,6 +2061,13 @@ INDEX_HTML = r"""<!doctype html>
       }
       main {
         padding: 16px 20px;
+        width: calc(100vw - 40px);
+      }
+      .table-container {
+        overflow-x: auto;
+      }
+      table {
+        min-width: 1180px;
       }
       .active-card {
         flex-direction: column;
