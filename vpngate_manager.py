@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import concurrent.futures
+import html as html_lib
 import sys
 import uuid
 
@@ -63,6 +64,21 @@ ACCEPTED_EXIT_IP_TYPES = {
     item.strip().lower()
     for item in os.environ.get("ACCEPTED_EXIT_IP_TYPES", "residential,mobile").split(",")
     if item.strip()
+}
+
+PUBLICVPNLIST_COUNTRY_SLUGS = {
+    "Korea Republic of": "south-korea",
+    "Korea": "south-korea",
+    "Republic of Korea": "south-korea",
+    "Russian Federation": "russia",
+    "Russian": "russia",
+    "United States": "usa",
+    "United Kingdom": "united-kingdom",
+    "Viet Nam": "vietnam",
+    "Taiwan Province of China": "taiwan",
+    "United Arab Emirates": "united-arab-emirates",
+    "UAE": "united-arab-emirates",
+    "Czech Republic": "czech-republic",
 }
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
@@ -413,6 +429,79 @@ def clean_node_sort_key(node: dict[str, Any]) -> tuple[int, int, int, int]:
     score = parse_int(node.get("score"))
     return (sessions, ping, -speed, -score)
 
+def normalize_country_key(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+
+def country_match_keys(value: Any) -> set[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+
+    values = {raw, raw.replace("_", " "), raw.replace("-", " ")}
+    translated = vpn_utils.COUNTRY_TRANSLATIONS.get(raw)
+    if translated:
+        values.add(translated)
+
+    raw_key = normalize_country_key(raw)
+    for english, display in vpn_utils.COUNTRY_TRANSLATIONS.items():
+        if raw_key in {normalize_country_key(english), normalize_country_key(display)}:
+            values.add(english)
+            values.add(display)
+
+    return {key for item in values if (key := normalize_country_key(item))}
+
+def country_matches(country_filter: str | None, *values: Any) -> bool:
+    if not country_filter:
+        return True
+    wanted = country_match_keys(country_filter)
+    if not wanted:
+        return True
+    for value in values:
+        if wanted & country_match_keys(value):
+            return True
+    return False
+
+def publicvpnlist_country_slug(country_filter: str | None) -> str:
+    raw = str(country_filter or "").strip()
+    if not raw:
+        return ""
+
+    raw_key = normalize_country_key(raw)
+    for english, display in vpn_utils.COUNTRY_TRANSLATIONS.items():
+        if raw_key in {normalize_country_key(english), normalize_country_key(display)}:
+            return PUBLICVPNLIST_COUNTRY_SLUGS.get(english, re.sub(r"[^a-z0-9]+", "-", english.lower()).strip("-"))
+
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,40}", raw):
+        return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+    return ""
+
+def parse_publicvpnlist_country_links(html: str, country_filter: str | None) -> list[str]:
+    if not country_filter:
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    pattern = re.compile(r'<a[^>]+href=["\'](?P<href>/country/(?P<slug>[^/"\']+)/?)["\'][^>]*>(?P<label>.*?)</a>', re.IGNORECASE | re.DOTALL)
+    for match in pattern.finditer(html):
+        label = re.sub(r"<[^>]+>", " ", match.group("label"))
+        label = html_lib.unescape(re.sub(r"\s+", " ", label)).strip()
+        slug = match.group("slug")
+        if country_matches(country_filter, label, slug):
+            url = urllib.parse.urljoin(PUBLICVPNLIST_URL, match.group("href"))
+            if url not in seen:
+                urls.append(url)
+                seen.add(url)
+    return urls
+
+def publicvpnlist_country_urls(country_filter: str | None, home_html: str) -> list[str]:
+    urls = parse_publicvpnlist_country_links(home_html, country_filter)
+    slug = publicvpnlist_country_slug(country_filter)
+    if slug:
+        url = urllib.parse.urljoin(PUBLICVPNLIST_URL, f"country/{urllib.parse.quote(slug)}/")
+        if url not in urls:
+            urls.append(url)
+    return urls
+
 def parse_publicvpnlist_entries(html: str) -> list[dict[str, Any]]:
     pattern = re.compile(
         r'href="/download/(?P<id>\d+)/"[^>]*data-download-country="(?P<country>[^"]*)"[^>]*'
@@ -483,11 +572,44 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict
         "probed_at": 0,
     }
 
-def fetch_publicvpnlist_candidates(blacklist: dict[str, dict[str, Any]], seen_ips: set[str]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def fetch_publicvpnlist_candidates(
+    blacklist: dict[str, dict[str, Any]],
+    seen_ips: set[str],
+    country_filter: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     rejected: dict[str, int] = {}
     nodes: list[dict[str, Any]] = []
-    html = fetch_text_url(PUBLICVPNLIST_URL, timeout=45)
-    entries = parse_publicvpnlist_entries(html)
+    home_html = fetch_text_url(PUBLICVPNLIST_URL, timeout=45)
+    page_htmls: list[str] = []
+    if country_filter:
+        for url in publicvpnlist_country_urls(country_filter, home_html):
+            try:
+                page_htmls.append(fetch_text_url(url, timeout=45))
+            except Exception as exc:
+                rejected["country_page_failed"] = rejected.get("country_page_failed", 0) + 1
+                print(f"[publicvpnlist] country page failed {url}: {exc}", flush=True)
+        if not page_htmls:
+            page_htmls.append(home_html)
+    else:
+        page_htmls.append(home_html)
+
+    entries: list[dict[str, Any]] = []
+    seen_entry_ids: set[str] = set()
+    for html in page_htmls:
+        for entry in parse_publicvpnlist_entries(html):
+            entry_id = str(entry.get("id") or "")
+            if not entry_id or entry_id in seen_entry_ids:
+                continue
+            if country_filter and not country_matches(country_filter, entry.get("country"), entry.get("code")):
+                continue
+            entries.append(entry)
+            seen_entry_ids.add(entry_id)
+
+    if country_filter and not entries:
+        for entry in parse_publicvpnlist_entries(home_html):
+            if country_matches(country_filter, entry.get("country"), entry.get("code")):
+                entries.append(entry)
+
     for entry in entries[:PUBLICVPNLIST_LIMIT]:
         ip = str(entry.get("ip") or entry.get("host") or "")
         if not ip or ip in seen_ips:
@@ -510,7 +632,7 @@ def fetch_publicvpnlist_candidates(blacklist: dict[str, dict[str, Any]], seen_ip
         seen_ips.add(ip)
     return nodes, rejected
 
-def fetch_candidates() -> list[dict[str, Any]]:
+def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
     blacklist = load_blacklist()
     candidates: list[dict[str, Any]] = []
     seen_ips = set()
@@ -521,7 +643,7 @@ def fetch_candidates() -> list[dict[str, Any]]:
     log_to_json("INFO", "Main", "Fetching public VPN node sources...")
     log_to_json("INFO", "Main", "Fetching PublicVPNList candidates...")
     try:
-        pvl_nodes, pvl_rejected = fetch_publicvpnlist_candidates(blacklist, seen_ips)
+        pvl_nodes, pvl_rejected = fetch_publicvpnlist_candidates(blacklist, seen_ips, country_filter)
         candidates.extend(pvl_nodes)
         for key, value in pvl_rejected.items():
             rejected[f"publicvpnlist_{key}"] = rejected.get(f"publicvpnlist_{key}", 0) + value
@@ -539,6 +661,8 @@ def fetch_candidates() -> list[dict[str, Any]]:
             api_text = fetch_api_text()
             rows = parse_vpngate_rows(api_text)
             for row in rows[:MAX_SCAN_ROWS]:
+                if country_filter and not country_matches(country_filter, row.get("CountryLong"), row.get("CountryShort")):
+                    continue
                 ip = row.get("IP", "")
                 if not ip or ip in seen_ips:
                     continue
@@ -1189,9 +1313,11 @@ def connect_node(node_id: str) -> str:
         with lock:
             is_connecting = False
 
-def maintain_valid_nodes(force: bool = False) -> str:
+def maintain_valid_nodes(force: bool = False, country_filter: str | None = None) -> str:
     global active_openvpn_process, active_openvpn_node_id
     ensure_dirs()
+    if country_filter:
+        set_state(last_check_at=time.time(), last_check_message=f"Fetching nodes for {country_filter}...")
     if force:
         with lock:
             stop_active_openvpn()
@@ -1206,11 +1332,11 @@ def maintain_valid_nodes(force: bool = False) -> str:
             auto_switch_node()
 
     try:
-        candidates = fetch_candidates()
+        candidates = fetch_candidates(country_filter)
     except Exception as exc:
         vpn_utils.check_and_fix_dns()
         try:
-            candidates = fetch_candidates()
+            candidates = fetch_candidates(country_filter)
         except Exception as exc2:
             set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=str(exc2))
             candidates = []
@@ -1267,6 +1393,8 @@ def maintain_valid_nodes(force: bool = False) -> str:
 
     valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
     message = f"Fetched {len(candidates)} nodes. Tested first 10 nodes."
+    if country_filter:
+        message = f"Fetched {len(candidates)} nodes for {country_filter}. Tested first 10 nodes."
     set_state(
         last_check_at=time.time(),
         last_check_message=message,
@@ -2435,6 +2563,18 @@ const translateCountry = c => {
   return dict[c] || c || "-";
 };
 
+const SOURCE_COUNTRY_OPTIONS = [
+  "Japan", "Korea Republic of", "Thailand", "United States", "United Kingdom",
+  "Russian Federation", "Viet Nam", "Taiwan", "Hong Kong", "Singapore",
+  "Malaysia", "Indonesia", "India", "Philippines", "Australia", "New Zealand",
+  "Canada", "Ukraine", "France", "Germany", "Netherlands", "Sweden", "Norway",
+  "Spain", "Turkey", "South Africa", "Brazil", "Argentina", "Chile", "Mexico",
+  "Egypt", "Romania", "Poland", "Kazakhstan", "Georgia", "Mongolia",
+  "Saudi Arabia", "Iran", "Iraq", "Colombia", "Cambodia", "Ireland", "Italy",
+  "Switzerland", "Belgium", "Austria", "Denmark", "Finland", "Portugal",
+  "Greece", "Czech Republic", "Hungary", "Israel", "United Arab Emirates"
+];
+
 const translateStatus = s => {
   const dict = {"available": "可用", "unavailable": "不可用", "not_checked": "待检测"};
   return dict[s] || s || "待检测";
@@ -2450,7 +2590,9 @@ function getLatencyClass(ms) {
 function updateCountryFilter() {
   const select = $("country_filter");
   const selectedValue = select.value;
-  const countries = Array.from(new Set(nodes.map(n => translateCountry(n.country)).filter(Boolean))).sort();
+  const countrySet = new Set(SOURCE_COUNTRY_OPTIONS.map(translateCountry).filter(Boolean));
+  nodes.map(n => translateCountry(n.country)).filter(Boolean).forEach(c => countrySet.add(c));
+  const countries = Array.from(countrySet).sort();
   
   const currentOptions = Array.from(select.options).map(o => o.value).filter(Boolean);
   if (JSON.stringify(countries) === JSON.stringify(currentOptions)) {
@@ -2845,7 +2987,23 @@ async function load(){
 }
 
 $("search").oninput=()=>{ currentPage = 1; render(); };
-$("country_filter").onchange=()=>{ currentPage = 1; render(); };
+$("country_filter").onchange=async()=>{
+  currentPage = 1;
+  const country = $("country_filter").value;
+  render();
+  if (!country) return;
+  state.last_check_message = `Fetching nodes for ${country}...`;
+  render();
+  try {
+    await fetch("./api/refresh_country_nodes", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({country})
+    });
+    await load();
+    [3000, 8000, 15000].forEach(ms => setTimeout(load, ms));
+  } catch(e) {}
+};
 
 $("refresh").onclick=async()=>{ 
   $("refresh").disabled=true; 
@@ -3404,6 +3562,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
                 self.send_json({"ok": True, "message": "已在后台启动节点更新流程"})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        elif effective_path == "/api/refresh_country_nodes":
+            try:
+                length = parse_int(self.headers.get("Content-Length"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                country_filter = str(payload.get("country") or "").strip()
+                if not country_filter:
+                    self.send_json({"ok": False, "error": "country is required"}, HTTPStatus.BAD_REQUEST)
+                    return
+                set_state(last_check_at=time.time(), last_check_message=f"Fetching nodes for {country_filter}...")
+                threading.Thread(target=maintain_valid_nodes, args=(False, country_filter), daemon=True).start()
+                self.send_json({"ok": True, "message": f"Started country refresh for {country_filter}"})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/test_nodes":
