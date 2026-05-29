@@ -2519,6 +2519,8 @@ let currentPage = 1;
 const pageSize = 11;
 let currentPageNodes = [];
 let nodesRefreshInFlight = null;
+let countryRefreshTimer = null;
+let countryRefreshAttempts = 0;
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
@@ -2681,6 +2683,30 @@ function getFilteredNodes() {
     ].join(" ").toLowerCase();
     return searchStr.includes(q);
   });
+}
+
+function countNodesForCountry(country) {
+  if (!country) return nodes.length;
+  return nodes.filter(n => translateCountry(n.country) === country).length;
+}
+
+function stopCountryRefreshPolling() {
+  if (countryRefreshTimer) {
+    clearInterval(countryRefreshTimer);
+    countryRefreshTimer = null;
+  }
+}
+
+function startCountryRefreshPolling(country) {
+  stopCountryRefreshPolling();
+  countryRefreshAttempts = 0;
+  countryRefreshTimer = setInterval(async () => {
+    countryRefreshAttempts += 1;
+    await load();
+    if ($("country_filter").value !== country || countNodesForCountry(country) > 0 || countryRefreshAttempts >= 24) {
+      stopCountryRefreshPolling();
+    }
+  }, 5000);
 }
 
 function stableSortNodes() {
@@ -3059,6 +3085,7 @@ $("search").oninput=()=>{ currentPage = 1; render(); };
 $("country_filter").onchange=async()=>{
   currentPage = 1;
   const country = $("country_filter").value;
+  stopCountryRefreshPolling();
   render();
   if (!country) return;
   state.last_check_message = `Fetching nodes for ${country}...`;
@@ -3070,7 +3097,9 @@ $("country_filter").onchange=async()=>{
       body: JSON.stringify({country})
     });
     await load();
-    [3000, 8000, 15000].forEach(ms => setTimeout(load, ms));
+    if (countNodesForCountry(country) === 0) {
+      startCountryRefreshPolling(country);
+    }
   } catch(e) {}
 };
 
