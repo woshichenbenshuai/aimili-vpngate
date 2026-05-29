@@ -141,7 +141,7 @@ def generate_random_suffix():
 def load_ui_cfg():
     import json
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
-    cfg = {"host": "0.0.0.0", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
+    cfg = {"host": "127.0.0.1", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -843,7 +843,7 @@ while True:
     python3 -c "
 import json
 cfg = {
-    'host': '0.0.0.0',
+    'host': '127.0.0.1',
     'port': int('$UI_PORT'),
     'secret_path': '$SECRET_PATH',
     'username': '$UI_USERNAME',

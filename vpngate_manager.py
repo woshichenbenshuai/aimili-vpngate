@@ -36,9 +36,15 @@ OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
 OPENVPN_AUTH_PASS = os.environ.get("OPENVPN_AUTH_PASS", "vpn")
 LOCAL_PROXY_HOST = os.environ.get("LOCAL_PROXY_HOST", "127.0.0.1")
 LOCAL_PROXY_PORT = int(os.environ.get("LOCAL_PROXY_PORT", "7928"))
-UI_HOST = os.environ.get("UI_HOST", "0.0.0.0")
+UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
 UI_PORT = int(os.environ.get("UI_PORT", "8787"))
 INVALID_BACKOFF_SECONDS = int(os.environ.get("INVALID_BACKOFF_SECONDS", str(30 * 60)))
+BLACKLIST_TTL_SECONDS = int(os.environ.get("BLACKLIST_TTL_SECONDS", str(6 * 60 * 60)))
+ACCEPTED_EXIT_IP_TYPES = {
+    item.strip().lower()
+    for item in os.environ.get("ACCEPTED_EXIT_IP_TYPES", "residential,mobile,normal").split(",")
+    if item.strip()
+}
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
@@ -46,6 +52,7 @@ CONFIG_DIR = DATA_DIR / "configs"
 NODES_FILE = DATA_DIR / "nodes.json"
 STATE_FILE = DATA_DIR / "state.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
+BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 
 lock = threading.RLock()
 active_openvpn_process: subprocess.Popen[str] | None = None
@@ -99,7 +106,7 @@ def load_ui_config() -> dict[str, Any]:
             "username": "admin",
             "secret_path": "EJsW2EeBo9lY",
             "password": "",
-            "host": "0.0.0.0",
+            "host": "127.0.0.1",
             "port": 8787
         }
         updated = False
@@ -182,6 +189,7 @@ def get_state() -> dict[str, Any]:
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
     state.setdefault("local_proxy", f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}")
+    state.setdefault("accepted_exit_ip_types", sorted(ACCEPTED_EXIT_IP_TYPES))
     state.setdefault("last_fetch_status", "not_started")
     state.setdefault("last_check_message", "")
     state.setdefault("blacklisted_nodes", 0)
@@ -225,10 +233,60 @@ def decode_config(encoded: str) -> str:
     return base64.b64decode(encoded.encode("ascii"), validate=False).decode("utf-8", errors="replace")
 
 def load_blacklist() -> dict[str, dict[str, Any]]:
-    return {}
+    raw = read_json(BLACKLIST_FILE, {})
+    if not isinstance(raw, dict):
+        return {}
+    now = time.time()
+    cleaned = {
+        str(key): value
+        for key, value in raw.items()
+        if isinstance(value, dict) and now - float(value.get("at", 0)) < BLACKLIST_TTL_SECONDS
+    }
+    if len(cleaned) != len(raw):
+        write_json(BLACKLIST_FILE, cleaned)
+    return cleaned
 
 def mark_blacklisted(node: dict[str, Any], message: str) -> None:
-    pass
+    key = str(node.get("ip") or node.get("remote_host") or node.get("id") or "").strip()
+    if not key:
+        return
+    blacklist = load_blacklist()
+    blacklist[key] = {
+        "id": node.get("id", ""),
+        "ip": node.get("ip", ""),
+        "remote_host": node.get("remote_host", ""),
+        "reason": message,
+        "at": time.time(),
+    }
+    write_json(BLACKLIST_FILE, blacklist)
+
+def is_blacklisted(node: dict[str, Any], blacklist: dict[str, dict[str, Any]]) -> bool:
+    keys = {
+        str(node.get("id") or ""),
+        str(node.get("ip") or ""),
+        str(node.get("remote_host") or ""),
+    }
+    return any(key and key in blacklist for key in keys)
+
+def exit_type_allowed(ip_type: str | None) -> bool:
+    normalized = (ip_type or "normal").strip().lower() or "normal"
+    return normalized in ACCEPTED_EXIT_IP_TYPES
+
+def enrich_exit_ip(ip: str) -> dict[str, Any]:
+    info = {
+        "ip": ip,
+        "remote_host": ip,
+        "owner": "",
+        "asn": "",
+        "as_name": "",
+        "location": "",
+        "ip_type": "",
+        "quality": "",
+    }
+    if ip:
+        vpn_utils.enrich_ip_info([info])
+    info["ip_type"] = (info.get("ip_type") or "normal").lower()
+    return info
 
 def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     ip = row.get("IP", "")
@@ -288,6 +346,8 @@ def fetch_candidates() -> list[dict[str, Any]]:
                     continue
                 config_text = decode_config(encoded)
                 node = row_to_node(row, config_text)
+                if is_blacklisted(node, blacklist):
+                    continue
                 candidates.append(node)
                 seen_ips.add(ip)
         except Exception as e:
@@ -627,6 +687,9 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
     }
     if ok:
         vpn_utils.enrich_ip_info([temp_node])
+        if not exit_type_allowed(temp_node.get("ip_type")):
+            ok = False
+            message = f"Rejected by exit IP policy: {temp_node.get('ip_type') or 'normal'}"
 
     with lock:
         nodes = read_json(NODES_FILE, [])
@@ -708,6 +771,9 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
             }
             vpn_utils.enrich_ip_info([ip_to_enrich])
             temp_node.update(ip_to_enrich)
+            if not exit_type_allowed(temp_node.get("ip_type")):
+                temp_node["probe_status"] = "unavailable"
+                temp_node["probe_message"] = f"Rejected by exit IP policy: {temp_node.get('ip_type') or 'normal'}"
         return temp_node
 
     updated_nodes_map = {}
@@ -745,8 +811,15 @@ def auto_switch_node() -> None:
             n for n in nodes 
             if n.get("probe_status") == "available" 
             and not n.get("active")
+            and exit_type_allowed(n.get("ip_type"))
         ]
-        candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
+        candidates.sort(
+            key=lambda n: (
+                0 if (n.get("ip_type") or "").lower() in ("residential", "mobile") else 1,
+                parse_int(n.get("latency_ms")) or 999999,
+                -parse_int(n.get("score")),
+            )
+        )
         
     if candidates:
         next_node = candidates[0]
@@ -3025,7 +3098,25 @@ def check_proxy_health() -> dict[str, Any]:
                 ip = ip_obj.get("ip") or res_data.strip()
             except Exception:
                 ip = res_data.strip()
-            return {"ok": True, "ip": ip, "latency_ms": latency}
+            exit_info = enrich_exit_ip(ip)
+            ip_type = exit_info.get("ip_type", "normal")
+            if not exit_type_allowed(ip_type):
+                return {
+                    "ok": False,
+                    "ip": ip,
+                    "ip_type": ip_type,
+                    "location": exit_info.get("location", ""),
+                    "owner": exit_info.get("owner", ""),
+                    "error": f"Exit IP type rejected by policy: {ip_type}. Accepted: {','.join(sorted(ACCEPTED_EXIT_IP_TYPES))}",
+                }
+            return {
+                "ok": True,
+                "ip": ip,
+                "latency_ms": latency,
+                "ip_type": ip_type,
+                "location": exit_info.get("location", ""),
+                "owner": exit_info.get("owner", ""),
+            }
     except Exception as e:
         try:
             t0 = time.perf_counter()
@@ -3033,7 +3124,25 @@ def check_proxy_health() -> dict[str, Any]:
             with opener.open(req, timeout=5) as response:
                 ip = response.read().decode('utf-8').strip()
                 latency = int((time.perf_counter() - t0) * 1000)
-                return {"ok": True, "ip": ip, "latency_ms": latency}
+                exit_info = enrich_exit_ip(ip)
+                ip_type = exit_info.get("ip_type", "normal")
+                if not exit_type_allowed(ip_type):
+                    return {
+                        "ok": False,
+                        "ip": ip,
+                        "ip_type": ip_type,
+                        "location": exit_info.get("location", ""),
+                        "owner": exit_info.get("owner", ""),
+                        "error": f"Exit IP type rejected by policy: {ip_type}. Accepted: {','.join(sorted(ACCEPTED_EXIT_IP_TYPES))}",
+                    }
+                return {
+                    "ok": True,
+                    "ip": ip,
+                    "latency_ms": latency,
+                    "ip_type": ip_type,
+                    "location": exit_info.get("location", ""),
+                    "owner": exit_info.get("owner", ""),
+                }
         except Exception as e2:
             err_msg = str(e)
             if "Connection refused" in err_msg or "Failed to receive SOCKS5" in err_msg:
@@ -3060,6 +3169,9 @@ def background_proxy_checker() -> None:
                     proxy_ok=True,
                     proxy_ip=res["ip"],
                     proxy_latency_ms=res["latency_ms"],
+                    proxy_ip_type=res.get("ip_type", "normal"),
+                    proxy_location=res.get("location", ""),
+                    proxy_owner=res.get("owner", ""),
                     proxy_error=""
                 )
                 log_to_json("INFO", "Proxy", f"代理可用，IP: {res['ip']}, 延迟: {res['latency_ms']} ms")
@@ -3070,8 +3182,11 @@ def background_proxy_checker() -> None:
                     log_to_json("WARNING", "Proxy", f"代理不可用: {error_msg}")
                 set_state(
                     proxy_ok=False,
-                    proxy_ip="-",
+                    proxy_ip=res.get("ip", "-"),
                     proxy_latency_ms=0,
+                    proxy_ip_type=res.get("ip_type", ""),
+                    proxy_location=res.get("location", ""),
+                    proxy_owner=res.get("owner", ""),
                     proxy_error=error_msg
                 )
 
@@ -3472,6 +3587,7 @@ def main() -> None:
             "fetch_interval_seconds": FETCH_INTERVAL_SECONDS,
             "check_interval_seconds": CHECK_INTERVAL_SECONDS,
             "local_proxy": f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}",
+            "accepted_exit_ip_types": sorted(ACCEPTED_EXIT_IP_TYPES),
             "active_openvpn_node_id": "",
             "last_fetch_status": "starting",
             "last_check_message": "service starting",
