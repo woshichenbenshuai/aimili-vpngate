@@ -31,19 +31,27 @@ def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float
 
     import random
     tx_id = random.getrandbits(16).to_bytes(2, "big")
-    packet = tx_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    flags = b"\x01\x00"
+    questions = b"\x00\x01"
+    rrs = b"\x00\x00\x00\x00\x00\x00"
     qname = b""
     for part in host.split("."):
         if not part:
             continue
         part_bytes = part.encode("idna")
         qname += len(part_bytes).to_bytes(1, "big") + part_bytes
-    packet += qname + b"\x00\x00\x01\x00\x01"
+    qname += b"\x00"
+
+    qtype_qclass = b"\x00\x01\x00\x01"
+    packet = tx_id + flags + questions + rrs + qname + qtype_qclass
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.settimeout(timeout)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0")
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0")
+        except OSError:
+            return None
         sock.sendto(packet, (dns_server, 53))
         resp, _ = sock.recvfrom(2048)
     except Exception:
@@ -51,7 +59,13 @@ def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float
     finally:
         sock.close()
 
-    if len(resp) < 12 or resp[:2] != tx_id or (resp[3] & 0x0F) != 0:
+    if len(resp) < 12:
+        return None
+    if resp[:2] != tx_id:
+        return None
+
+    rcode = resp[3] & 0x0F
+    if rcode != 0:
         return None
 
     offset = 12
@@ -60,23 +74,30 @@ def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float
         if length == 0:
             offset += 1
             break
-        if (length & 0xC0) == 0xC0:
+        elif (length & 0xC0) == 0xC0:
             offset += 2
             break
-        offset += 1 + length
+        else:
+            offset += 1 + length
     offset += 4
 
     answers_count = int.from_bytes(resp[6:8], "big")
+    if answers_count == 0:
+        return None
+
     for _ in range(answers_count):
+        if offset >= len(resp):
+            break
         while offset < len(resp):
             length = resp[offset]
             if length == 0:
                 offset += 1
                 break
-            if (length & 0xC0) == 0xC0:
+            elif (length & 0xC0) == 0xC0:
                 offset += 2
                 break
-            offset += 1 + length
+            else:
+                offset += 1 + length
         if offset + 10 > len(resp):
             break
         atype = int.from_bytes(resp[offset : offset + 2], "big")
@@ -86,7 +107,8 @@ def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float
         if offset + rdlength > len(resp):
             break
         if atype == 1 and aclass == 1 and rdlength == 4:
-            return socket.inet_ntoa(resp[offset : offset + 4])
+            ip_bytes = resp[offset : offset + 4]
+            return socket.inet_ntoa(ip_bytes)
         offset += rdlength
     return None
 
