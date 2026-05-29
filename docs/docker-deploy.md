@@ -62,12 +62,19 @@ curl https://api.ipify.org
 curl -x socks5h://127.0.0.1:8317 http://api.ipify.org --max-time 10
 ```
 
-## Strict Residential Mode
+## Clean Public Node Mode
 
-Edit `docker-compose.yml` if you only want residential or mobile exits:
+Docker defaults to a cleaner public-node profile:
 
 ```yaml
+PUBLICVPNLIST_URL: https://publicvpnlist.com/
+PUBLICVPNLIST_LIMIT: "40"
 ACCEPTED_EXIT_IP_TYPES: residential,mobile
+MAX_SCAN_ROWS: "1000"
+MAX_NODE_SESSIONS: "30"
+MAX_NODE_PING: "350"
+MIN_NODE_SPEED: "1000000"
+DENY_NODE_IP_PREFIXES: 219.100.37.,219.100.36.
 ```
 
 Apply changes:
@@ -76,4 +83,4 @@ Apply changes:
 docker compose up -d --build
 ```
 
-Strict mode can take longer to find usable nodes because VPNGate availability changes often.
+This skips busy public nodes, slow entries, and common VPNGate shared prefixes before testing. Lower `MAX_NODE_SESSIONS` for fewer users, or set it to `0` to disable the session limit.

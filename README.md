@@ -105,8 +105,8 @@ sudo apt-get update
 ### ✨ Key Features
 
 1. ⚡ **Auto-Collection & Multi-Threaded Probing**:
-   * Periodically fetches candidate nodes from VPNGate.
-   * Performs concurrent ping latency and handshake tests to maintain a pool of high-quality nodes.
+   * Periodically fetches candidate nodes from PublicVPNList and VPNGate.
+   * Pulls from PublicVPNList first, falls back to VPNGate, filters busy/shared public pools, then performs concurrent ping latency and handshake tests.
 2. 🔒 **Anti-Lockout Routing (Policy Routing)**:
    * Directs traffic from the virtual adapter `tun0` to a customized routing table (Table 100) without altering the system's default gateway.
    * Keeps SSH sessions and server administration panels unaffected by the active VPN.
