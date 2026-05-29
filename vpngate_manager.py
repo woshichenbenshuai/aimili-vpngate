@@ -450,13 +450,14 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict
     ip = str(entry.get("ip") or entry.get("host") or "")
     country_name = str(entry.get("country") or "")
     country_code = str(entry.get("code") or "").upper().replace("-", "_")
+    country_display = vpn_utils.COUNTRY_TRANSLATIONS.get(country_name, country_name or country_code)
     remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, ip)
     node_id = safe_name("_".join(["PVL", country_code or "XX", ip or remote_host, str(remote_port), proto]))
     config_path = CONFIG_DIR / f"{node_id}.ovpn"
     return {
         "id": node_id,
         "source": "publicvpnlist",
-        "country": country_name or country_code,
+        "country": country_display,
         "country_short": country_code,
         "host_name": str(entry.get("host") or ""),
         "ip": ip,
@@ -1847,16 +1848,21 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     table {
-      width: 100%;
+      width: max-content;
+      min-width: 1180px;
       border-collapse: collapse;
       text-align: left;
-      min-width: 1000px;
+      table-layout: fixed;
     }
 
     th, td {
-      padding: 14px 20px;
+      padding: 14px 16px;
       border-bottom: 1px solid var(--border-color);
       font-size: 14px;
+      vertical-align: middle;
+      white-space: normal;
+      word-break: normal;
+      overflow-wrap: anywhere;
     }
 
     th {
@@ -1866,7 +1872,19 @@ INDEX_HTML = r"""<!doctype html>
       text-transform: uppercase;
       letter-spacing: 0.8px;
       color: var(--text-secondary);
+      white-space: nowrap;
     }
+
+    th:nth-child(1), td:nth-child(1) { width: 96px; }
+    th:nth-child(2), td:nth-child(2) { width: 82px; }
+    th:nth-child(3), td:nth-child(3) { width: 118px; }
+    th:nth-child(4), td:nth-child(4) { width: 190px; white-space: nowrap; }
+    th:nth-child(5), td:nth-child(5) { width: 170px; min-width: 170px; overflow-wrap: normal; }
+    th:nth-child(6), td:nth-child(6) { width: 150px; }
+    th:nth-child(7), td:nth-child(7) { width: 210px; }
+    th:nth-child(8), td:nth-child(8) { width: 96px; }
+    th:nth-child(9), td:nth-child(9) { width: 100px; }
+    th:nth-child(10), td:nth-child(10) { width: 130px; }
 
     tr {
       transition: background 0.2s ease;
@@ -2423,7 +2441,7 @@ function getLatencyClass(ms) {
 function updateCountryFilter() {
   const select = $("country_filter");
   const selectedValue = select.value;
-  const countries = Array.from(new Set(nodes.map(n => n.country).filter(Boolean))).sort();
+  const countries = Array.from(new Set(nodes.map(n => translateCountry(n.country)).filter(Boolean))).sort();
   
   const currentOptions = Array.from(select.options).map(o => o.value).filter(Boolean);
   if (JSON.stringify(countries) === JSON.stringify(currentOptions)) {
@@ -2444,7 +2462,7 @@ function getFilteredNodes() {
   const q = $("search").value.toLowerCase();
   const selectedCountry = $("country_filter").value;
   return nodes.filter(n => {
-    if (selectedCountry && n.country !== selectedCountry) {
+    if (selectedCountry && translateCountry(n.country) !== selectedCountry) {
       return false;
     }
     const searchStr = [
