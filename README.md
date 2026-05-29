@@ -79,7 +79,7 @@ sudo apt-get update
    [ 3x-ui / Xray ] 
          │ (HTTP / SOCKS5)
          ▼
-   [ 本地代理服务器 ] (Port 7928) ──(强制绑定 SO_BINDTODEVICE)──► [ tun0 虚拟网卡 ]
+   [ 本地代理服务器 ] (Port 8317) ──(强制绑定 SO_BINDTODEVICE)──► [ tun0 虚拟网卡 ]
          │                                                            │
          │ (SSH, Web UI, etc. 依然走物理路由)                           │ (策略路由表 100)
          ▼                                                            ▼
@@ -113,7 +113,7 @@ sudo apt-get update
    * Outbound socket connections inside the local proxy server are strictly bound to `tun0` via `SO_BINDTODEVICE`.
    * If the VPN disconnects, proxy requests are instantly blocked with a `502 Bad Gateway` instead of falling back to the VPS physical IP address.
 4. 🖥️ **Modern Web UI Panel**:
-   * Sleek dark/light responsive console (default port `8787`).
+   * Sleek dark/light responsive console (default port `6379`).
    * Provides real-time geolocation, ISP, ASN, latency, and IP-type (residential/datacenter) detection.
    * Enables manual node selection, blacklist resets, proxy speed-testing, and logs query.
    * Secured by a random secret path suffix (e.g., `/EJsW2EeBo9lY/`) and password authentication.

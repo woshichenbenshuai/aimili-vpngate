@@ -1,0 +1,6 @@
+.git
+__pycache__
+*.pyc
+vpngate_data
+scratch
+*.log

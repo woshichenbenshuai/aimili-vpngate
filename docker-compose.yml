@@ -1,0 +1,20 @@
+services:
+  aimilivpn:
+    build: .
+    container_name: aimilivpn
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPNGATE_DATA_DIR: /data
+      LOCAL_PROXY_HOST: 127.0.0.1
+      LOCAL_PROXY_PORT: "8317"
+      UI_HOST: 127.0.0.1
+      UI_PORT: "6379"
+      ACCEPTED_EXIT_IP_TYPES: residential,mobile,normal
+      BLACKLIST_TTL_SECONDS: "21600"
+    volumes:
+      - ./vpngate_data:/data

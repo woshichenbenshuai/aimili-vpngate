@@ -44,9 +44,9 @@ OPENVPN_CMD = os.environ.get("OPENVPN_CMD", "openvpn")
 OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
 OPENVPN_AUTH_PASS = os.environ.get("OPENVPN_AUTH_PASS", "vpn")
 LOCAL_PROXY_HOST = os.environ.get("LOCAL_PROXY_HOST", "127.0.0.1")
-LOCAL_PROXY_PORT = int(os.environ.get("LOCAL_PROXY_PORT", "7928"))
+LOCAL_PROXY_PORT = int(os.environ.get("LOCAL_PROXY_PORT", "8317"))
 UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
-UI_PORT = int(os.environ.get("UI_PORT", "8787"))
+UI_PORT = int(os.environ.get("UI_PORT", "6379"))
 INVALID_BACKOFF_SECONDS = int(os.environ.get("INVALID_BACKOFF_SECONDS", str(30 * 60)))
 BLACKLIST_TTL_SECONDS = int(os.environ.get("BLACKLIST_TTL_SECONDS", str(6 * 60 * 60)))
 ACCEPTED_EXIT_IP_TYPES = {
@@ -125,7 +125,7 @@ def load_ui_config() -> dict[str, Any]:
             "secret_path": "EJsW2EeBo9lY",
             "password": "",
             "host": "127.0.0.1",
-            "port": 8787
+            "port": 6379
         }
         updated = False
         if auth_file.exists():
@@ -243,7 +243,7 @@ def get_state() -> dict[str, Any]:
     # Pre-populate settings inputs in UI
     ui_cfg = load_ui_config()
     state["username"] = ui_cfg.get("username", "")
-    state["port"] = ui_cfg.get("port", 8787)
+    state["port"] = ui_cfg.get("port", 6379)
     state["secret_path"] = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
     
     return state
@@ -1592,56 +1592,6 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--text-primary);
     }
 
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-
-    .stat {
-      background: var(--bg-surface);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 20px;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      position: relative;
-      overflow: hidden;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .stat:hover {
-      background: var(--bg-surface-hover);
-      border-color: var(--border-color-hover);
-      transform: translateY(-2px);
-      box-shadow: 0 8px 24px rgba(99, 102, 241, 0.1);
-    }
-
-    .stat-info {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .stat strong {
-      font-size: 32px;
-      font-weight: 700;
-      display: block;
-      margin-bottom: 4px;
-      background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-
-    .stat span {
-      font-size: 13px;
-      color: var(--text-secondary);
-      font-weight: 500;
-    }
-
     .stat-icon-wrapper {
       width: 44px;
       height: 44px;
@@ -1657,143 +1607,6 @@ INDEX_HTML = r"""<!doctype html>
       width: 22px;
       height: 22px;
       color: var(--primary);
-    }
-
-    .stat:nth-child(2) .stat-icon { color: var(--warning); }
-    .stat:nth-child(3) .stat-icon { color: var(--success); }
-
-    .ad-section {
-      background: var(--bg-surface);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--border-color);
-      border-radius: 16px;
-      padding: 20px;
-      margin-bottom: 24px;
-    }
-    
-    .ad-card {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-    
-    .ad-title {
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--text-primary);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    
-    .ad-badge {
-      background: var(--primary-gradient);
-      color: white;
-      font-size: 11px;
-      padding: 3px 8px;
-      border-radius: 6px;
-      font-weight: 700;
-      text-transform: uppercase;
-      box-shadow: 0 2px 6px rgba(99, 102, 241, 0.3);
-    }
-    
-    .ad-links {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 16px;
-    }
-    
-    .ad-item {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 10px;
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      justify-content: space-between;
-      transition: all 0.2s ease;
-    }
-    
-    .ad-item:hover {
-      background: rgba(255, 255, 255, 0.04);
-      border-color: var(--border-color-hover);
-      transform: translateY(-2px);
-    }
-    
-    .ad-tag {
-      font-size: 11px;
-      font-weight: 700;
-      padding: 3px 8px;
-      border-radius: 6px;
-      width: fit-content;
-    }
-    
-    .tag-normal {
-      background: rgba(99, 102, 241, 0.15);
-      color: #a5b4fc;
-      border: 1px solid rgba(99, 102, 241, 0.2);
-    }
-    
-    .tag-opt {
-      background: rgba(245, 158, 11, 0.15);
-      color: #fde047;
-      border: 1px solid rgba(245, 158, 11, 0.2);
-    }
-    
-    .tag-premium {
-      background: rgba(16, 185, 129, 0.15);
-      color: #6ee7b7;
-      border: 1px solid rgba(16, 185, 129, 0.2);
-    }
-    
-    .ad-desc {
-      font-size: 13px;
-      color: var(--text-secondary);
-      line-height: 1.5;
-      flex: 1;
-    }
-    
-    .ad-btn {
-      align-self: flex-start;
-      text-decoration: none;
-      background: rgba(255, 255, 255, 0.06);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      color: var(--text-primary);
-      font-size: 12px;
-      font-weight: 600;
-      padding: 6px 14px;
-      border-radius: 6px;
-      transition: all 0.2s ease;
-      text-align: center;
-    }
-    
-    .ad-item:hover .ad-btn {
-      background: var(--primary-gradient);
-      border-color: transparent;
-      color: white;
-      box-shadow: 0 4px 10px rgba(99, 102, 241, 0.2);
-    }
-    
-    .ad-footer {
-      border-top: 1px dashed rgba(255, 255, 255, 0.08);
-      padding-top: 12px;
-      font-size: 13px;
-      color: var(--text-secondary);
-      text-align: center;
-    }
-    
-    .forum-link {
-      color: #818cf8;
-      font-weight: 700;
-      text-decoration: none;
-      transition: color 0.2s ease;
-    }
-    
-    .forum-link:hover {
-      color: #a5b4fc;
-      text-decoration: underline;
     }
 
     .toolbar {
@@ -2213,98 +2026,8 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </header>
 <main>
-  <section class="ad-section">
-    <div class="ad-card">
-      <div class="ad-title">
-        <span class="ad-badge">推荐</span> <strong>购买高性价比 VPS 搭建节点或用作客户端</strong>
-      </div>
-      <div class="ad-links">
-        <div class="ad-item">
-          <span class="ad-tag tag-normal">普通用户推荐</span>
-          <span class="ad-desc">RackNerd - 超低折扣价格，日常使用实惠方便，海外多机房可选，推荐普通家庭或低频用户。</span>
-          <a href="https://my.racknerd.com/aff.php?aff=18708" target="_blank" class="ad-btn">点击进入官网</a>
-        </div>
-        <div class="ad-item">
-          <span class="ad-tag tag-opt">网络优化推荐</span>
-          <span class="ad-desc">VMiss - 专线优化网络 (CN2 GIA/9929/CMIN2 等顶级线路)，低延迟不丢包，推荐高网络要求用户。</span>
-          <a href="https://app.vmiss.com/aff.php?aff=4619" target="_blank" class="ad-btn">点击进入官网</a>
-        </div>
-        <div class="ad-item">
-          <span class="ad-tag tag-premium">高端企业推荐</span>
-          <span class="ad-desc">BandwagonHost (搬瓦工) - 直连三网顶级专线，经典高带宽 CN2 GIA 线路，超凡稳定速度。</span>
-          <a href="https://bandwagonhost.com/aff.php?aff=81790" target="_blank" class="ad-btn">点击进入官网</a>
-        </div>
-      </div>
-      <div class="ad-footer">
-        官方技术支持及优质资源交流论坛：<a href="https://339936.xyz" target="_blank" class="forum-link">339936.xyz</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- 当前连接活动节点卡片 -->
   <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
     <!-- Rendered dynamically by render() -->
-  </section>
-
-  <section class="stats">
-    <div class="stat">
-      <div class="stat-info">
-        <strong id="total">0</strong>
-        <span>可用节点池</span>
-      </div>
-      <div class="stat-icon-wrapper">
-        <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="stat-info">
-        <strong id="target">3</strong>
-        <span>目标储备数</span>
-      </div>
-      <div class="stat-icon-wrapper">
-        <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="stat-info">
-        <strong id="active">0</strong>
-        <span>已激活连接</span>
-      </div>
-      <div class="stat-icon-wrapper">
-        <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-      </div>
-    </div>
-  </section>
-
-  <section class="proxy-test-section" style="margin-bottom: 24px;">
-    <div class="stat" style="display: flex; flex-direction: row; justify-content: space-between; align-items: center; width: 100%; box-sizing: border-box; flex-wrap: wrap; gap: 16px;">
-      <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
-        <div class="stat-icon-wrapper" style="background: rgba(99, 102, 241, 0.1); border-color: rgba(99, 102, 241, 0.2);">
-          <svg xmlns="http://www.w3.org/2000/svg" class="stat-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--primary);"><path stroke-linecap="round" stroke-linejoin="round" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071a10.5 10.5 0 0114.14 0M1.414 8.05a16 16 0 0121.172 0" /></svg>
-        </div>
-        <div>
-          <h3 style="margin: 0 0 4px 0; font-size: 16px; font-weight: 600; color: var(--text-primary);">本地代理出口检测 (Port 7928)</h3>
-          <p style="margin: 0; font-size: 13px; color: var(--text-secondary);">
-            测试本地 HTTP/SOCKS5 代理是否成功通过当前 VPN 节点出站，并获取实际出口公网 IP 和延迟。
-          </p>
-        </div>
-      </div>
-      <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-left: auto;">
-        <div id="proxy_test_result" style="text-align: right;">
-          <div style="font-size: 14px; font-weight: 500; color: var(--text-secondary);">
-            测试状态: <span id="proxy_status_badge" class="badge not_checked" style="margin-left: 4px;">未检测</span>
-          </div>
-          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
-            出口 IP: <span id="proxy_ip_val" class="mono" style="font-weight: 600; color: var(--text-primary);">-</span> 
-            <span id="proxy_latency_val" style="margin-left: 8px;"></span>
-          </div>
-        </div>
-        <button id="btn_test_proxy" class="btn-primary" style="height: 40px; padding: 0 16px;">
-          <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-          测试代理
-        </button>
-      </div>
-    </div>
   </section>
 
   <section class="toolbar">
@@ -2376,7 +2099,7 @@ INDEX_HTML = r"""<!doctype html>
           
           <div class="form-group" style="margin-bottom: 12px;">
             <label class="form-label" for="settings_port">网页端口</label>
-            <input type="number" id="settings_port" class="input-field" required min="1" max="65535" placeholder="8787">
+            <input type="number" id="settings_port" class="input-field" required min="1" max="65535" placeholder="6379">
           </div>
           
           <div class="form-group" style="margin-bottom: 12px;">
@@ -2645,66 +2368,10 @@ function render(){
 
   const shown = getFilteredNodes();
   
-  $("total").textContent=nodes.length; 
-  $("target").textContent=state.target_valid_nodes||3;
-  $("active").textContent=activeNode?1:0; 
-  
   const statusMessage = state.last_check_message || "";
   const activeNodeInfo = activeNode ? `<span class="badge available" style="margin-left:8px; padding:2px 8px;">${esc(translateCountry(activeNode.country))} (${activeNode.id})</span>` : `<span class="badge unavailable" style="margin-left:8px; padding:2px 8px;">无</span>`;
-  $("status").innerHTML=`<span class="status-dot"></span>HTTP 代理本地接口：http://127.0.0.1:7928 | 活动节点：${activeNodeInfo} | 状态：${statusMessage}`;
-  
-  // Update proxy test status card based on background checks
-  const pBadge = $("proxy_status_badge");
-  const pIpVal = $("proxy_ip_val");
-  const pLatVal = $("proxy_latency_val");
-  const pBtn = $("btn_test_proxy");
-  
-  if (state.is_connecting) {
-    pBadge.className = "badge";
-    pBadge.style.background = "rgba(245, 158, 11, 0.15)";
-    pBadge.style.color = "#f59e0b";
-    pBadge.style.borderColor = "rgba(245, 158, 11, 0.3)";
-    pBadge.innerHTML = `<span class="badge-pulse" style="background: #f59e0b;"></span>正在连接`;
-    pIpVal.textContent = state.active_node_latency || "正在连接...";
-    pLatVal.innerHTML = `<span style="color: var(--text-secondary); font-size: 12px;">${esc(state.last_check_message || "正在与 VPN 节点建立加密隧道，请稍候...")}</span>`;
-    pBtn.disabled = true;
-    pBtn.style.opacity = "0.5";
-    pBtn.style.cursor = "not-allowed";
-  } else {
-    pBtn.disabled = false;
-    pBtn.style.opacity = "";
-    pBtn.style.cursor = "";
-    pBadge.style.background = "";
-    pBadge.style.color = "";
-    pBadge.style.borderColor = "";
-    if (state.proxy_ok !== undefined) {
-      if (state.proxy_ok) {
-        pBadge.className = "badge available";
-        pBadge.textContent = "可用";
-        pIpVal.textContent = state.proxy_ip || "-";
-        const latencyClass = getLatencyClass(state.proxy_latency_ms);
-        pLatVal.innerHTML = `<span class="latency-val ${latencyClass}" style="margin-left:8px;">${state.proxy_latency_ms} ms</span>`;
-      } else {
-        pBadge.className = "badge unavailable";
-        pBadge.textContent = "不可用";
-        pIpVal.textContent = "-";
-        if (state.last_check_message) {
-          pLatVal.innerHTML = `<span style="color: var(--text-secondary); font-size: 12px;">${esc(state.last_check_message)}</span>`;
-        } else {
-          pLatVal.innerHTML = `<span class="latency-val latency-poor" style="margin-left:8px; font-size:11px;" title="${esc(state.proxy_error)}">${esc(state.proxy_error || "连接失败")}</span>`;
-        }
-      }
-    } else {
-      pBadge.className = "badge not_checked";
-      pBadge.textContent = "未检测";
-      pIpVal.textContent = "-";
-      if (state.last_check_message) {
-        pLatVal.innerHTML = `<span style="color: var(--text-secondary); font-size: 12px;">${esc(state.last_check_message)}</span>`;
-      } else {
-        pLatVal.innerHTML = "";
-      }
-    }
-  }
+  const proxyInfo = state.proxy_ok ? ` | 出口：${esc(state.proxy_ip || "-")} ${state.proxy_latency_ms ? `(${state.proxy_latency_ms} ms)` : ""}` : "";
+  $("status").innerHTML=`<span class="status-dot"></span>本地代理：http://127.0.0.1:8317 | 活动节点：${activeNodeInfo}${proxyInfo} | 状态：${esc(statusMessage)}`;
 
   // Pagination calculation
   const totalPages = Math.ceil(shown.length / pageSize) || 1;
@@ -2976,46 +2643,6 @@ $("check").onclick=async()=>{
   try{await fetch("./api/check",{method:"POST"}); await load();} 
   finally{$("check").disabled=false; $("check").textContent="立即检测补齐";}
 };
-$("btn_test_proxy").onclick = async () => {
-  const btn = $("btn_test_proxy");
-  const badge = $("proxy_status_badge");
-  const ipVal = $("proxy_ip_val");
-  const latVal = $("proxy_latency_val");
-  
-  btn.disabled = true;
-  btn.innerHTML = `<span class="badge-pulse"></span>测试中...`;
-  badge.className = "badge not_checked";
-  badge.textContent = "检测中...";
-  ipVal.textContent = "-";
-  latVal.textContent = "";
-  
-  try {
-    const response = await fetch("./api/test_proxy", { method: "POST" });
-    const result = await response.json();
-    if (result.ok) {
-      badge.className = "badge available";
-      badge.textContent = "可用";
-      ipVal.textContent = result.ip || "-";
-      
-      const latencyClass = getLatencyClass(result.latency_ms);
-      latVal.innerHTML = `<span class="latency-val ${latencyClass}" style="margin-left:8px;">${result.latency_ms} ms</span>`;
-    } else {
-      badge.className = "badge unavailable";
-      badge.textContent = "不可用";
-      ipVal.textContent = "-";
-      latVal.innerHTML = `<span class="latency-val latency-poor" style="margin-left:8px; font-size:11px;" title="${esc(result.error)}">连接失败</span>`;
-    }
-  } catch (e) {
-    badge.className = "badge unavailable";
-    badge.textContent = "网络错误";
-    ipVal.textContent = "-";
-    latVal.innerHTML = `<span class="latency-val latency-poor" style="margin-left:8px; font-size:11px;">请求出错</span>`;
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> 测试代理`;
-  }
-};
-
 // Admin dropdown toggle
 const adminBtn = $("admin_btn");
 const adminDropdown = $("admin_dropdown");
@@ -3036,7 +2663,7 @@ function openSettingsModal() {
   $("settings_form").reset();
   
   if (state) {
-    $("settings_port").value = state.port || 8787;
+    $("settings_port").value = state.port || 6379;
     $("settings_suffix").value = state.secret_path || "EJsW2EeBo9lY";
   }
   
@@ -3151,99 +2778,6 @@ setInterval(async () => {
 </script>
 </body></html>"""
 
-def _legacy_check_proxy_health() -> dict[str, Any]:
-    # 1. 检测代理服务端口是否在监听
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.5)
-    try:
-        s.connect(("127.0.0.1", LOCAL_PROXY_PORT))
-        s.close()
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"代理服务未运行 (端口 {LOCAL_PROXY_PORT} 连接失败，原因: {e})"
-        }
-
-    # 2. 检测虚拟网卡 tun0 是否存在 (Linux 下)
-    tun_path = Path("/sys/class/net/tun0")
-    if sys.platform.startswith("linux") and not tun_path.exists():
-        return {
-            "ok": False,
-            "error": "VPN 虚拟网卡 (tun0) 未启用，请确保当前已成功连接 VPN 节点"
-        }
-
-    # 3. 尝试通过代理请求外网接口
-    proxy_url = f"http://127.0.0.1:{LOCAL_PROXY_PORT}"
-    proxy_handler = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
-    opener = urllib.request.build_opener(proxy_handler)
-    try:
-        t0 = time.perf_counter()
-        req = urllib.request.Request("https://api.ipify.org?format=json", headers={"User-Agent": "curl/7.68.0"})
-        with opener.open(req, timeout=5) as response:
-            res_data = response.read().decode('utf-8')
-            latency = int((time.perf_counter() - t0) * 1000)
-            try:
-                ip_obj = json.loads(res_data)
-                ip = ip_obj.get("ip") or res_data.strip()
-            except Exception:
-                ip = res_data.strip()
-            exit_info = enrich_exit_ip(ip)
-            ip_type = exit_info.get("ip_type", "normal")
-            if not exit_type_allowed(ip_type):
-                return {
-                    "ok": False,
-                    "ip": ip,
-                    "ip_type": ip_type,
-                    "location": exit_info.get("location", ""),
-                    "owner": exit_info.get("owner", ""),
-                    "error": f"Exit IP type rejected by policy: {ip_type}. Accepted: {','.join(sorted(ACCEPTED_EXIT_IP_TYPES))}",
-                }
-            return {
-                "ok": True,
-                "ip": ip,
-                "latency_ms": latency,
-                "ip_type": ip_type,
-                "location": exit_info.get("location", ""),
-                "owner": exit_info.get("owner", ""),
-            }
-    except Exception as e:
-        try:
-            t0 = time.perf_counter()
-            req = urllib.request.Request("https://ifconfig.me/ip", headers={"User-Agent": "curl/7.68.0"})
-            with opener.open(req, timeout=5) as response:
-                ip = response.read().decode('utf-8').strip()
-                latency = int((time.perf_counter() - t0) * 1000)
-                exit_info = enrich_exit_ip(ip)
-                ip_type = exit_info.get("ip_type", "normal")
-                if not exit_type_allowed(ip_type):
-                    return {
-                        "ok": False,
-                        "ip": ip,
-                        "ip_type": ip_type,
-                        "location": exit_info.get("location", ""),
-                        "owner": exit_info.get("owner", ""),
-                        "error": f"Exit IP type rejected by policy: {ip_type}. Accepted: {','.join(sorted(ACCEPTED_EXIT_IP_TYPES))}",
-                    }
-                return {
-                    "ok": True,
-                    "ip": ip,
-                    "latency_ms": latency,
-                    "ip_type": ip_type,
-                    "location": exit_info.get("location", ""),
-                    "owner": exit_info.get("owner", ""),
-                }
-        except Exception as e2:
-            err_msg = str(e)
-            if "Connection refused" in err_msg or "Failed to receive SOCKS5" in err_msg:
-                return {
-                    "ok": False,
-                    "error": "代理中转握手失败 (OpenVPN 已连接，但无法建立外部 TCP 握手)"
-                }
-            return {
-                "ok": False,
-                "error": f"VPN 节点无外网访问权限 (请求超时或线路被拦截，报错: {e})"
-            }
-
 def check_proxy_health() -> dict[str, Any]:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.5)
@@ -3338,7 +2872,7 @@ def background_proxy_checker() -> None:
             else:
                 error_msg = res.get("error", "未知错误")
                 if active_openvpn_node_id:
-                    print(f"[警告] 7928 端口本地代理当前不可用！原因: {error_msg}", flush=True)
+                    print(f"[警告] 8317 端口本地代理当前不可用！原因: {error_msg}", flush=True)
                     log_to_json("WARNING", "Proxy", f"代理不可用: {error_msg}")
                 set_state(
                     proxy_ok=False,

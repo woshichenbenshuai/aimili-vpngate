@@ -150,7 +150,7 @@ def generate_random_suffix():
 def load_ui_cfg():
     import json
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
-    cfg = {"host": "127.0.0.1", "port": 8787, "secret_path": "EJsW2EeBo9lY", "username": "", "password": ""}
+    cfg = {"host": "127.0.0.1", "port": 6379, "secret_path": "EJsW2EeBo9lY", "username": "", "password": ""}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -317,12 +317,12 @@ def format_line(label, value, target_width=26):
 
 def print_status():
     cfg = load_ui_cfg()
-    ui_port = cfg.get("port", 8787)
+    ui_port = cfg.get("port", 6379)
     secret_path = cfg.get("secret_path", "EJsW2EeBo9lY")
     state = load_state()
     is_connecting = state.get("is_connecting", False)
     
-    gateway_ok = check_port_listening(7928)
+    gateway_ok = check_port_listening(8317)
     service_ok = check_service_active("aimilivpn.service")
     openvpn_ok = check_openvpn_process()
     pid = get_service_pid("aimilivpn.service")
@@ -349,7 +349,7 @@ def print_status():
     print(f"               {bold}AimiliVPN 管理终端 v2.0{reset}                  ")
     print("=======================================================")
     print("【核心服务状态】")
-    print(format_line("代理网关 (Port 7928)", gateway_status))
+    print(format_line("代理网关 (Port 8317)", gateway_status))
     print(format_line(f"管理后台 (Port {ui_port})", backend_status))
     print(format_line("连接核心 (OpenVPN)", openvpn_status))
     
@@ -372,8 +372,8 @@ def print_status():
         print(format_line("节点状态", "无活动连接"))
     print()
     print("【使用方法】")
-    print(f"  export http_proxy=socks5h://127.0.0.1:7928")
-    print(f"  export https_proxy=socks5h://127.0.0.1:7928")
+    print(f"  export http_proxy=socks5h://127.0.0.1:8317")
+    print(f"  export https_proxy=socks5h://127.0.0.1:8317")
     print("=======================================================")
 
 def start_service():
@@ -538,7 +538,7 @@ def configure_port():
     print("=======================================================")
     print("                      管理端口配置                     ")
     print("=======================================================")
-    print(f"当前网页管理端口为: {cfg.get('port', 8787)}")
+    print(f"当前网页管理端口为: {cfg.get('port', 6379)}")
     try:
         val = input("请输入新的管理端口 (1-65535, 按回车取消): ").strip()
         if val:
@@ -649,7 +649,7 @@ def get_status_state():
     cfg = load_ui_cfg()
     state = load_state()
     return (
-        cfg.get("port", 8787),
+        cfg.get("port", 6379),
         cfg.get("secret_path", "EJsW2EeBo9lY"),
         cfg.get("username", "admin"),
         cfg.get("password", ""),
@@ -658,7 +658,7 @@ def get_status_state():
         state.get("active_openvpn_node_id", ""),
         state.get("last_check_message", ""),
         state.get("active_node_latency", ""),
-        check_port_listening(7928),
+        check_port_listening(8317),
         check_service_active("aimilivpn.service"),
         check_openvpn_process(),
         get_service_pid("aimilivpn.service")
@@ -782,7 +782,7 @@ if [ ! -f "$AUTH_FILE" ]; then
     read -p "是否自定义配置？[y/N]: " is_custom
     
     # Initialize defaults
-    UI_PORT=8787
+    UI_PORT=6379
     # generate random secret suffix (12 chars alphanumeric)
     SECRET_PATH=$(python3 -c "import random, string; print(''.join(random.choices(string.ascii_letters + string.digits, k=12)))")
     # generate random password
@@ -809,9 +809,9 @@ while True:
         # Step-by-step custom inputs
         # 1. Custom port
         while true; do
-            read -p "请输入自定义管理端口 [1-65535, 默认 8787]: " input_port
+            read -p "请输入自定义管理端口 [1-65535, 默认 6379]: " input_port
             if [ -z "$input_port" ]; then
-                UI_PORT=8787
+                UI_PORT=6379
                 break
             fi
             if [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
@@ -913,13 +913,13 @@ fi
 SECRET_PATH="EJsW2EeBo9lY"
 USERNAME="admin"
 PASSWORD="未配置"
-UI_PORT=8787
+UI_PORT=6379
 AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
 if [ -f "$AUTH_FILE" ]; then
     SECRET_PATH=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('secret_path', 'EJsW2EeBo9lY'))" 2>/dev/null || echo "EJsW2EeBo9lY")
     USERNAME=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('username', 'admin'))" 2>/dev/null || echo "admin")
     PASSWORD=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('password', '未配置'))" 2>/dev/null || echo "未配置")
-    UI_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('port', 8787))" 2>/dev/null || echo "8787")
+    UI_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('port', 6379))" 2>/dev/null || echo "6379")
 fi
 
 # Get VPS public IP
@@ -933,7 +933,7 @@ echo -e "${GREEN}==========================================================${PLA
 echo -e "  * 网页控制面板:  ${BLUE}http://${PUBLIC_IP}:${UI_PORT}/${SECRET_PATH}/${PLAIN}"
 echo -e "  * 网页管理账号:  ${YELLOW}${USERNAME}${PLAIN}"
 echo -e "  * 网页管理密码:  ${YELLOW}${PASSWORD}${PLAIN}"
-echo -e "  * HTTP/SOCKS5 代理端口:  ${BLUE}http://127.0.0.1:7928/${PLAIN}"
+echo -e "  * HTTP/SOCKS5 代理端口:  ${BLUE}http://127.0.0.1:8317/${PLAIN}"
 echo -e " --------------------------------------------------------"
 echo -e "  * 快速状态指令:   ${YELLOW}ml status${PLAIN}  或  ${YELLOW}ml${PLAIN}"
 echo -e "  * 查看实时日志:   ${YELLOW}ml logs${PLAIN}"
