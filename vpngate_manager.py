@@ -21,6 +21,15 @@ from pathlib import Path
 from typing import Any
 import concurrent.futures
 import sys
+import uuid
+
+# Prefer IPv4 lookups to avoid slow or unusable AAAA paths on minimal VPS installs.
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family == 0:
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _ipv4_getaddrinfo
 
 import vpn_utils
 import proxy_server
@@ -55,6 +64,7 @@ AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 
 lock = threading.RLock()
+active_sessions: dict[str, float] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
 is_connecting = False
@@ -99,11 +109,19 @@ def generate_random_password() -> str:
         if has_lower and has_upper and has_digit:
             return pwd
 
+def generate_random_username() -> str:
+    import string
+    chars = string.ascii_letters + string.digits
+    while True:
+        uname = "".join(random.choices(chars, k=12))
+        if uname[0].isalpha() and any(c.islower() for c in uname) and any(c.isupper() for c in uname) and any(c.isdigit() for c in uname):
+            return uname
+
 def load_ui_config() -> dict[str, Any]:
     with lock:
         auth_file = DATA_DIR / "ui_auth.json"
         config = {
-            "username": "admin",
+            "username": "",
             "secret_path": "EJsW2EeBo9lY",
             "password": "",
             "host": "127.0.0.1",
@@ -117,6 +135,10 @@ def load_ui_config() -> dict[str, Any]:
                     config[key] = val
             except Exception:
                 pass
+
+        if not config.get("username"):
+            config["username"] = generate_random_username()
+            updated = True
         
         if not config.get("password"):
             config["password"] = generate_random_password()
@@ -134,6 +156,30 @@ def load_ui_config() -> dict[str, Any]:
 def get_session_token(password: str, username: str = "admin") -> str:
     salt = "aimilivpn_secure_salt_2026"
     return hashlib.sha256((username + ":" + password + salt).encode("utf-8")).hexdigest()
+
+def create_session_token() -> str:
+    token = uuid.uuid4().hex
+    with lock:
+        active_sessions[token] = time.time() + 30 * 24 * 3600
+    return token
+
+def revoke_session_token(token: str) -> None:
+    if not token:
+        return
+    with lock:
+        active_sessions.pop(token, None)
+
+def session_token_valid(token: str) -> bool:
+    if not token:
+        return False
+    now = time.time()
+    with lock:
+        expires_at = active_sessions.get(token)
+        if expires_at is not None and expires_at > now:
+            return True
+        if expires_at is not None:
+            active_sessions.pop(token, None)
+    return False
 
 def cleanup_old_logs(logs_dir: Path) -> None:
     try:
@@ -196,7 +242,7 @@ def get_state() -> dict[str, Any]:
     
     # Pre-populate settings inputs in UI
     ui_cfg = load_ui_config()
-    state["username"] = ui_cfg.get("username", "admin")
+    state["username"] = ui_cfg.get("username", "")
     state["port"] = ui_cfg.get("port", 8787)
     state["secret_path"] = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
     
@@ -329,9 +375,11 @@ def fetch_candidates() -> list[dict[str, Any]]:
     blacklist = load_blacklist()
     candidates: list[dict[str, Any]] = []
     seen_ips = set()
+    has_cache = len(cached_nodes()) > 0
+    max_attempts = 1 if has_cache else 2
     
     log_to_json("INFO", "Main", "开始拉取官方 API 节点列表...")
-    for i in range(3):
+    for i in range(max_attempts):
         if i > 0:
             time.sleep(1.5)
         try:
@@ -353,14 +401,14 @@ def fetch_candidates() -> list[dict[str, Any]]:
         except Exception as e:
             print(f"[fetch_candidates] Fetch {i+1} failed: {e}", flush=True)
             log_to_json("WARNING", "Main", f"第 {i+1} 次拉取 API 节点失败: {e}")
-            if i == 0 and not candidates:
+            if i == max_attempts - 1 and not candidates:
                 log_to_json("ERROR", "Main", f"获取官方 API 节点失败: {e}")
                 raise
                 
     set_state(
         last_fetch_at=time.time(),
         last_fetch_status="ok",
-        last_fetch_message=f"Fetched {len(candidates)} unique candidates across multiple attempts.",
+        last_fetch_message=f"Fetched {len(candidates)} unique candidates across {max_attempts} attempt(s).",
         blacklisted_nodes=len(blacklist),
     )
     log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")
@@ -803,7 +851,12 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         
     return list(updated_nodes_map.values())
 
-def auto_switch_node() -> None:
+def auto_switch_node(attempt: int = 0) -> None:
+    if attempt >= 3:
+        print("[auto_switch] Switch failed 3 times; stopping this round to avoid recursion loop.", flush=True)
+        log_to_json("WARNING", "VPN", "Auto-switch stopped after 3 failed attempts.")
+        return
+
     # Find the next best available node
     with lock:
         nodes = read_json(NODES_FILE, [])
@@ -832,7 +885,7 @@ def auto_switch_node() -> None:
             err_msg = f"切换到备用节点 {next_node['id']} 失败: {e}，将尝试下一个..."
             print(f"[自动切换] {err_msg}", flush=True)
             log_to_json("WARNING", "VPN", err_msg)
-            auto_switch_node()
+            auto_switch_node(attempt + 1)
     else:
         msg = "没有可用的备选节点，将自动断开并清理当前连接状态，同时在后台异步获取新节点..."
         print(f"[自动切换] {msg}", flush=True)
@@ -924,6 +977,42 @@ def connect_node(node_id: str) -> str:
             if item["active"]:
                 item["probe_message"] = f"Active node. HTTP proxy: http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}"
         write_json(NODES_FILE, nodes)
+
+        set_state(last_check_message="Testing proxy egress IP and policy...")
+        proxy_res = check_proxy_health()
+        if proxy_res["ok"]:
+            set_state(
+                proxy_ok=True,
+                proxy_ip=proxy_res["ip"],
+                proxy_latency_ms=proxy_res["latency_ms"],
+                proxy_ip_type=proxy_res.get("ip_type", "normal"),
+                proxy_location=proxy_res.get("location", ""),
+                proxy_owner=proxy_res.get("owner", ""),
+                proxy_error="",
+            )
+        else:
+            error_msg = proxy_res.get("error", "Proxy health check failed")
+            mark_blacklisted(node, f"Post-connect proxy check failed: {error_msg}")
+            node["probe_status"] = "unavailable"
+            node["probe_message"] = error_msg
+            for item in nodes:
+                item["active"] = False
+                if item.get("id") == node_id:
+                    item.update(node)
+            write_json(NODES_FILE, nodes)
+            set_state(
+                proxy_ok=False,
+                proxy_ip=proxy_res.get("ip", "-"),
+                proxy_latency_ms=0,
+                proxy_ip_type=proxy_res.get("ip_type", ""),
+                proxy_location=proxy_res.get("location", ""),
+                proxy_owner=proxy_res.get("owner", ""),
+                proxy_error=error_msg,
+                active_openvpn_node_id="",
+                is_connecting=False,
+            )
+            stop_active_openvpn()
+            raise RuntimeError(error_msg)
         latency_str = f"{last_active_latency} ms" if last_active_latency > 0 else "检测超时"
         set_state(active_openvpn_node_id=node_id, is_connecting=False, last_check_message=f"Connected {node_id}", active_node_latency=latency_str)
         log_to_json("INFO", "VPN", f"节点 {node_id} 连接成功，出口网卡 tun0 已启用")
@@ -3062,7 +3151,7 @@ setInterval(async () => {
 </script>
 </body></html>"""
 
-def check_proxy_health() -> dict[str, Any]:
+def _legacy_check_proxy_health() -> dict[str, Any]:
     # 1. 检测代理服务端口是否在监听
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.5)
@@ -3154,6 +3243,77 @@ def check_proxy_health() -> dict[str, Any]:
                 "ok": False,
                 "error": f"VPN 节点无外网访问权限 (请求超时或线路被拦截，报错: {e})"
             }
+
+def check_proxy_health() -> dict[str, Any]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.5)
+    try:
+        s.connect(("127.0.0.1", LOCAL_PROXY_PORT))
+        s.close()
+    except Exception as e:
+        return {"ok": False, "error": f"Proxy service is not listening on {LOCAL_PROXY_PORT}: {e}"}
+
+    tun_path = Path("/sys/class/net/tun0")
+    if sys.platform.startswith("linux") and not tun_path.exists():
+        return {"ok": False, "error": "VPN interface tun0 is not active."}
+
+    def curl_exit_ip(url: str) -> tuple[str, int] | None:
+        cmd = [
+            "curl",
+            "-4",
+            "-s",
+            "-w",
+            "\n%{time_total} %{http_code}",
+            "-x",
+            f"socks5h://127.0.0.1:{LOCAL_PROXY_PORT}",
+            url,
+            "--max-time",
+            "5",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+        if res.returncode != 0:
+            return None
+        lines = res.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        ip = lines[0].strip()
+        parts = lines[1].strip().split()
+        if len(parts) != 2:
+            return None
+        total_time, http_code = parts
+        if http_code != "200" or not ip:
+            return None
+        return ip, int(float(total_time) * 1000)
+
+    last_error = ""
+    for url in ("http://ip.sb", "http://api.ipify.org"):
+        try:
+            result = curl_exit_ip(url)
+            if not result:
+                continue
+            ip, latency = result
+            exit_info = enrich_exit_ip(ip)
+            ip_type = exit_info.get("ip_type", "normal")
+            if not exit_type_allowed(ip_type):
+                return {
+                    "ok": False,
+                    "ip": ip,
+                    "ip_type": ip_type,
+                    "location": exit_info.get("location", ""),
+                    "owner": exit_info.get("owner", ""),
+                    "error": f"Exit IP type rejected by policy: {ip_type}. Accepted: {','.join(sorted(ACCEPTED_EXIT_IP_TYPES))}",
+                }
+            return {
+                "ok": True,
+                "ip": ip,
+                "latency_ms": latency,
+                "ip_type": ip_type,
+                "location": exit_info.get("location", ""),
+                "owner": exit_info.get("owner", ""),
+            }
+        except Exception as e:
+            last_error = str(e)
+    return {"ok": False, "error": f"Proxy egress test failed: {last_error or 'no valid response'}"}
 
 def background_proxy_checker() -> None:
     time.sleep(2)
@@ -3264,7 +3424,7 @@ class Handler(BaseHTTPRequestHandler):
     def is_authorized(self) -> bool:
         ui_cfg = load_ui_config()
         pwd = ui_cfg.get("password")
-        uname = ui_cfg.get("username", "admin")
+        uname = ui_cfg.get("username", "")
         if not pwd:
             return True
         
@@ -3277,8 +3437,7 @@ class Handler(BaseHTTPRequestHandler):
                     k, v = item.split("=", 1)
                     cookies[k.strip()] = v.strip()
         
-        expected_token = get_session_token(pwd, uname)
-        return cookies.get("session") == expected_token
+        return session_token_valid(cookies.get("session", ""))
 
     def validate_path(self) -> str:
         secret_path = self.get_secret_path()
@@ -3383,10 +3542,10 @@ class Handler(BaseHTTPRequestHandler):
                 
                 ui_cfg = load_ui_config()
                 expected_pwd = ui_cfg.get("password", "")
-                expected_uname = ui_cfg.get("username", "admin")
+                expected_uname = ui_cfg.get("username", "")
                 
                 if expected_pwd and input_pwd == expected_pwd and input_uname == expected_uname:
-                    token = get_session_token(expected_pwd, expected_uname)
+                    token = create_session_token()
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     secret_path = self.get_secret_path()
@@ -3402,6 +3561,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if effective_path == "/api/logout":
             try:
+                cookie_header = self.headers.get("Cookie", "")
+                cookies = {}
+                if cookie_header:
+                    for item in cookie_header.split(";"):
+                        item = item.strip()
+                        if "=" in item:
+                            k, v = item.split("=", 1)
+                            cookies[k.strip()] = v.strip()
+                revoke_session_token(cookies.get("session", ""))
                 secret_path = self.get_secret_path()
                 cookie_path = f"/{secret_path}/" if secret_path else "/"
                 self.send_response(HTTPStatus.OK)
@@ -3435,7 +3603,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 
                 ui_cfg = load_ui_config()
-                expected_uname = ui_cfg.get("username", "admin")
+                expected_uname = ui_cfg.get("username", "")
                 expected_pwd = ui_cfg.get("password", "")
                 
                 if curr_username != expected_uname or curr_password != expected_pwd:
@@ -3540,14 +3708,20 @@ class Handler(BaseHTTPRequestHandler):
                         proxy_ok=True,
                         proxy_ip=result["ip"],
                         proxy_latency_ms=result["latency_ms"],
+                        proxy_ip_type=result.get("ip_type", "normal"),
+                        proxy_location=result.get("location", ""),
+                        proxy_owner=result.get("owner", ""),
                         proxy_error=""
                     )
                 else:
                     set_state(
                         proxy_ok=False,
-                        proxy_ip="-",
+                        proxy_ip=result.get("ip", "-"),
                         proxy_latency_ms=0,
-                        proxy_error=result.get("reason", "未知错误")
+                        proxy_ip_type=result.get("ip_type", ""),
+                        proxy_location=result.get("location", ""),
+                        proxy_owner=result.get("owner", ""),
+                        proxy_error=result.get("error", "Unknown error")
                     )
                 self.send_json(result)
             except Exception as exc:

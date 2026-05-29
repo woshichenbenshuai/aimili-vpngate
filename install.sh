@@ -133,6 +133,15 @@ def generate_random_password():
         if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd):
             return pwd
 
+def generate_random_username():
+    import random
+    import string
+    chars = string.ascii_letters + string.digits
+    while True:
+        uname = "".join(random.choices(chars, k=12))
+        if uname[0].isalpha() and any(c.islower() for c in uname) and any(c.isupper() for c in uname) and any(c.isdigit() for c in uname):
+            return uname
+
 def generate_random_suffix():
     import random
     import string
@@ -141,7 +150,7 @@ def generate_random_suffix():
 def load_ui_cfg():
     import json
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
-    cfg = {"host": "127.0.0.1", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
+    cfg = {"host": "127.0.0.1", "port": 8787, "secret_path": "EJsW2EeBo9lY", "username": "", "password": ""}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -363,8 +372,8 @@ def print_status():
         print(format_line("节点状态", "无活动连接"))
     print()
     print("【使用方法】")
-    print(f"  export http_proxy=socks5://127.0.0.1:7928")
-    print(f"  export https_proxy=socks5://127.0.0.1:7928")
+    print(f"  export http_proxy=socks5h://127.0.0.1:7928")
+    print(f"  export https_proxy=socks5h://127.0.0.1:7928")
     print("=======================================================")
 
 def start_service():
@@ -567,9 +576,9 @@ def configure_credentials():
         key = getch()
         if key == '1':
             print("\033[H\033[J", end="")
-            new_uname = input("请输入新管理账号 (回车默认 admin): ").strip()
+            new_uname = input(f"请输入新管理账号 (回车默认 {curr_uname}): ").strip()
             if not new_uname:
-                new_uname = "admin"
+                new_uname = curr_uname
             new_pwd = input("请输入新管理密码 (不能为空): ").strip()
             if not new_pwd:
                 print("错误: 密码不能为空！")
@@ -786,7 +795,15 @@ while True:
         print(pwd)
         break
 ")
-    UI_USERNAME="admin"
+    UI_USERNAME=$(python3 -c "
+import random, string
+chars = string.ascii_letters + string.digits
+while True:
+    uname = ''.join(random.choices(chars, k=12))
+    if uname[0].isalpha() and any(c.islower() for c in uname) and any(c.isupper() for c in uname) and any(c.isdigit() for c in uname):
+        print(uname)
+        break
+")
 
     if [[ "$is_custom" =~ ^[Yy]$ ]]; then
         # Step-by-step custom inputs
@@ -820,7 +837,7 @@ while True:
         done
         
         # 3. Custom login username and password
-        read -p "请输入登录账号 [默认 admin]: " input_user
+        read -p "请输入登录账号 [默认 $UI_USERNAME]: " input_user
         if [ -n "$input_user" ]; then
             UI_USERNAME=$input_user
         fi
