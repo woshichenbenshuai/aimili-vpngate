@@ -107,11 +107,19 @@ def bounded_int(value: Any, default: int, min_value: int | None = None, max_valu
 
 API_URL = "https://www.vpngate.net/api/iphone/"
 PUBLICVPNLIST_URL = os.environ.get("PUBLICVPNLIST_URL", "https://publicvpnlist.com/")
-PUBLICVPNLIST_LIMIT = env_int("PUBLICVPNLIST_LIMIT", 40, 1)
+PUBLICVPNLIST_LIMIT = env_int("PUBLICVPNLIST_LIMIT", 100, 1)
+VPNBOOK_URL = os.environ.get("VPNBOOK_URL", "https://www.vpnbook.com/freevpn/openvpn")
+VPNBOOK_ENABLED = os.environ.get("VPNBOOK_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+VPNBOOK_LIMIT = env_int("VPNBOOK_LIMIT", 40, 1)
+VPNBOOK_PROTOCOLS = tuple(
+    item.strip().lower()
+    for item in os.environ.get("VPNBOOK_PROTOCOLS", "tcp443,tcp80,udp53,udp25000").split(",")
+    if item.strip()
+)
 FETCH_INTERVAL_SECONDS = env_int("FETCH_INTERVAL_SECONDS", 1260, 1)
 CHECK_INTERVAL_SECONDS = env_int("CHECK_INTERVAL_SECONDS", 1260, 1)
 TARGET_VALID_NODES = env_int("TARGET_VALID_NODES", 3, 1)
-MAX_SCAN_ROWS = env_int("MAX_SCAN_ROWS", 300, 1)
+MAX_SCAN_ROWS = env_int("MAX_SCAN_ROWS", 2000, 1)
 OPENVPN_TEST_TIMEOUT_SECONDS = env_int("OPENVPN_TEST_TIMEOUT_SECONDS", 35, 1)
 MANUAL_TEST_NODE_LIMIT = env_int("MANUAL_TEST_NODE_LIMIT", 5, 1, 20)
 INITIAL_CONNECT_TEST_LIMIT = env_int("INITIAL_CONNECT_TEST_LIMIT", 10, 1, 50)
@@ -414,6 +422,8 @@ def get_state() -> dict[str, Any]:
     state.setdefault("api_url", API_URL)
     state.setdefault("publicvpnlist_url", PUBLICVPNLIST_URL)
     state.setdefault("publicvpnlist_limit", PUBLICVPNLIST_LIMIT)
+    state.setdefault("vpnbook_enabled", VPNBOOK_ENABLED)
+    state.setdefault("vpnbook_limit", VPNBOOK_LIMIT)
     state.setdefault("target_valid_nodes", TARGET_VALID_NODES)
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
@@ -932,6 +942,170 @@ def download_publicvpnlist_config(entry_id: str) -> str:
         download_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, str(download_url))
     return fetch_text_url(str(download_url), timeout=30, accept="application/x-openvpn-profile,text/plain,*/*")
 
+def vpnbook_auth_path(username: str, password: str) -> str:
+    auth_path = DATA_DIR / "vpnbook_auth.txt"
+    try:
+        DATA_DIR.mkdir(exist_ok=True, parents=True)
+        auth_path.write_text(f"{username}\n{password}\n", encoding="utf-8")
+        try:
+            auth_path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        print(f"[vpnbook] failed to write auth file: {exc}", flush=True)
+    return str(auth_path)
+
+def normalize_openvpn_auth_directive(config_text: str, auth_path: str) -> str:
+    lines = config_text.splitlines()
+    updated = False
+    result: list[str] = []
+    for line in lines:
+        if line.strip().startswith("auth-user-pass"):
+            result.append(f"auth-user-pass {auth_path}")
+            updated = True
+        else:
+            result.append(line)
+    if not updated:
+        result.insert(0, f"auth-user-pass {auth_path}")
+    return "\n".join(result) + "\n"
+
+def parse_vpnbook_page(html: str) -> tuple[list[dict[str, str]], str, str]:
+    servers: list[dict[str, str]] = []
+    seen_hosts: set[str] = set()
+    server_pattern = re.compile(
+        r'<span[^>]*>\s*(?P<name>[^<]*Server[^<]*)\s*</span>\s*'
+        r'<span[^>]*>\s*(?P<host>[a-z]{2}\d+\.vpnbook\.com)\s*</span>',
+        re.IGNORECASE,
+    )
+    for match in server_pattern.finditer(html):
+        hostname = html_lib.unescape(match.group("host")).strip().lower()
+        if hostname in seen_hosts:
+            continue
+        seen_hosts.add(hostname)
+        name = html_lib.unescape(match.group("name")).strip()
+        prefix = re.match(r"([a-z]{2})", hostname)
+        code = (prefix.group(1).upper() if prefix else "")
+        servers.append({"name": name, "hostname": hostname, "country_code": "GB" if code == "UK" else code})
+
+    codes = [html_lib.unescape(c).strip() for c in re.findall(r"<code[^>]*>([^<]+)</code>", html, re.IGNORECASE)]
+    username = "vpnbook"
+    password = ""
+    for idx, code in enumerate(codes):
+        if code == "vpnbook" and idx + 1 < len(codes):
+            password = codes[idx + 1]
+            break
+    if not password:
+        raise RuntimeError("VPNBook password not found")
+    return servers, username, password
+
+def download_vpnbook_config(hostname: str, protocol: str) -> str:
+    base = urllib.parse.urljoin(VPNBOOK_URL, "/api/openvpn")
+    query = urllib.parse.urlencode({"hostname": hostname, "protocol": protocol})
+    request = urllib.request.Request(
+        f"{base}?{query}",
+        headers={
+            "User-Agent": "Mozilla/5.0 vpngate-openvpn-manager/2.0",
+            "Accept": "application/x-openvpn-profile,text/plain,*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        data = response.read()
+    return data.decode("utf-8", errors="replace")
+
+def vpnbook_country_display(country_code: str, fallback_name: str = "") -> str:
+    code = (country_code or "").upper()
+    mapping = {
+        "US": "United States",
+        "CA": "Canada",
+        "GB": "United Kingdom",
+        "DE": "Germany",
+        "FR": "France",
+        "PL": "Poland",
+    }
+    english = mapping.get(code)
+    if english:
+        return country_display_name(english) or english
+    for english_name in vpn_utils.COUNTRY_TRANSLATIONS:
+        if fallback_name.lower().startswith(english_name.lower()):
+            return country_display_name(english_name) or english_name
+    return fallback_name or code
+
+def vpnbook_entry_to_node(entry: dict[str, str], protocol: str, config_text: str, username: str, password: str) -> dict[str, Any]:
+    hostname = entry["hostname"]
+    auth_path = vpnbook_auth_path(username, password)
+    config_text = normalize_openvpn_auth_directive(config_text, auth_path)
+    remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, hostname)
+    country_code = entry.get("country_code", "")
+    node_id = safe_name("_".join(["VB", country_code or "XX", hostname, str(remote_port), proto]))
+    config_path = CONFIG_DIR / f"{node_id}.ovpn"
+    return {
+        "id": node_id,
+        "source": "vpnbook",
+        "country": vpnbook_country_display(country_code, entry.get("name", "")),
+        "country_short": country_code,
+        "host_name": entry.get("name", ""),
+        "ip": hostname,
+        "score": 0,
+        "ping": 0,
+        "speed": 0,
+        "sessions": 0,
+        "owner": "VPNBook",
+        "asn": "",
+        "as_name": "VPNBook",
+        "location": "",
+        "ip_type": "",
+        "quality": "",
+        "latency_ms": 0,
+        "config_file": str(config_path),
+        "config_text": config_text,
+        "proto": proto,
+        "remote_host": remote_host,
+        "remote_port": remote_port,
+        "fetched_at": time.time(),
+        "probe_status": "not_checked",
+        "probe_message": f"VPNBook {protocol.upper()}",
+        "probed_at": 0,
+    }
+
+def fetch_vpnbook_candidates(
+    blacklist: dict[str, dict[str, Any]],
+    seen_ips: set[str],
+    country_filter: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    rejected: dict[str, int] = {}
+    nodes: list[dict[str, Any]] = []
+    if not VPNBOOK_ENABLED:
+        return nodes, rejected
+
+    page_html = fetch_text_url(VPNBOOK_URL, timeout=45)
+    servers, username, password = parse_vpnbook_page(page_html)
+    for server in servers:
+        if country_filter and not country_values_match(country_filter, server.get("name"), server.get("country_code")):
+            continue
+        for protocol in VPNBOOK_PROTOCOLS:
+            if len(nodes) >= VPNBOOK_LIMIT:
+                return nodes, rejected
+            host_key = f"{server['hostname']}:{protocol}"
+            if host_key in seen_ips:
+                continue
+            try:
+                config_text = download_vpnbook_config(server["hostname"], protocol)
+                node = vpnbook_entry_to_node(server, protocol, config_text, username, password)
+            except Exception as exc:
+                rejected["download_failed"] = rejected.get("download_failed", 0) + 1
+                print(f"[vpnbook] failed to download {server.get('hostname')} {protocol}: {exc}", flush=True)
+                continue
+            if is_blacklisted(node, blacklist):
+                rejected["blacklisted"] = rejected.get("blacklisted", 0) + 1
+                continue
+            reject_reason = clean_candidate_reject_reason(node)
+            if reject_reason:
+                rejected[reject_reason] = rejected.get(reject_reason, 0) + 1
+                continue
+            nodes.append(node)
+            seen_ips.add(host_key)
+    return nodes, rejected
+
 def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict[str, Any]:
     ip = str(entry.get("ip") or entry.get("host") or "")
     country_name = str(entry.get("country") or "")
@@ -1087,6 +1261,17 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
         print(f"[publicvpnlist] source failed: {exc}", flush=True)
         log_to_json("WARNING", "Main", f"PublicVPNList source failed: {exc}")
 
+    try:
+        vpnbook_nodes, vpnbook_rejected = fetch_vpnbook_candidates(blacklist, seen_ips, country_filter)
+        candidates.extend(vpnbook_nodes)
+        for key, value in vpnbook_rejected.items():
+            rejected[f"vpnbook_{key}"] = rejected.get(f"vpnbook_{key}", 0) + value
+        log_to_json("INFO", "Main", f"VPNBook returned {len(vpnbook_nodes)} candidates.")
+    except Exception as exc:
+        rejected["vpnbook_error"] = rejected.get("vpnbook_error", 0) + 1
+        print(f"[vpnbook] source failed: {exc}", flush=True)
+        log_to_json("WARNING", "Main", f"VPNBook source failed: {exc}")
+
     attempts_targets = [(API_URL, True), (API_URL, False)]
     if API_URL.startswith("https://"):
         attempts_targets.append((API_URL.replace("https://", "http://"), True))
@@ -1157,6 +1342,7 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
     )
     log_to_json("INFO", "Main", f"Fetched {len(candidates)} clean candidates from public sources")
     return candidates
+
 def cached_nodes() -> list[dict[str, Any]]:
     return read_nodes()
 
@@ -1184,8 +1370,23 @@ def get_openvpn_version() -> float:
     _openvpn_version = 2.4
     return _openvpn_version
 
+def auth_file_for_openvpn_config(config_file: str) -> str:
+    try:
+        content = Path(config_file).read_text(encoding="utf-8", errors="replace")
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("auth-user-pass"):
+                continue
+            parts = shlex.split(stripped, posix=(os.name != "nt"))
+            if len(parts) >= 2 and Path(parts[1]).exists():
+                return parts[1]
+    except Exception:
+        pass
+    return str(AUTH_FILE)
+
 def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> list[str]:
     command = split_openvpn_command()
+    auth_file = auth_file_for_openvpn_config(config_file)
     command.extend(
         [
             "--config",
@@ -1207,7 +1408,7 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> 
             "--connect-timeout",
             "15",
             "--auth-user-pass",
-            str(AUTH_FILE),
+            auth_file,
             "--auth-nocache",
         ]
     )
@@ -3925,6 +4126,7 @@ function speed(v){return v?`${(v*8/1000/1000).toFixed(1)} Mbps`:"-"}
 const translateSource = s => {
   const normalized = String(s || "").toLowerCase();
   if (normalized === "publicvpnlist") return "PublicVPNList";
+  if (normalized === "vpnbook") return "VPNBook";
   if (normalized === "vpngate") return "VPNGate";
   return s || "VPNGate";
 };

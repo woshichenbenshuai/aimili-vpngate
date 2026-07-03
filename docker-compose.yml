@@ -15,13 +15,16 @@ services:
       UI_HOST: 0.0.0.0
       UI_PORT: "6379"
       PUBLICVPNLIST_URL: https://publicvpnlist.com/
-      PUBLICVPNLIST_LIMIT: "40"
-      MAX_SCAN_ROWS: "1000"
-      ACCEPTED_EXIT_IP_TYPES: residential,mobile
-      MAX_NODE_SESSIONS: "30"
-      MAX_NODE_PING: "350"
-      MIN_NODE_SPEED: "1000000"
-      DENY_NODE_IP_PREFIXES: 219.100.37.,219.100.36.
+      PUBLICVPNLIST_LIMIT: "100"
+      VPNBOOK_ENABLED: "1"
+      VPNBOOK_LIMIT: "40"
+      VPNBOOK_PROTOCOLS: tcp443,tcp80,udp53,udp25000
+      MAX_SCAN_ROWS: "2000"
+      ACCEPTED_EXIT_IP_TYPES: residential,mobile,normal,hosting
+      MAX_NODE_SESSIONS: "0"
+      MAX_NODE_PING: "0"
+      MIN_NODE_SPEED: "0"
+      DENY_NODE_IP_PREFIXES: ""
       BLACKLIST_TTL_SECONDS: "21600"
     volumes:
       - ./vpngate_data:/data
