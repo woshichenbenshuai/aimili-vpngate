@@ -1,67 +1,37 @@
-# ============================================
-#  AimiliVPN .gitignore
-# ============================================
-
-# ---- Nuitka 编译产物 ----
+# Nuitka compiler intermediate folders
 vpngate_manager.build/
 vpngate_manager.dist/
 *.build/
 *.dist/
 aimilivpn
 
-# ---- Debian 打包产物 ----
+# Debian building artifacts
 *.deb
 aimilivpn_*
 
-# ---- Python 缓存 ----
+# Python caches and bytecode
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.egg-info/
-dist/
-build/
-*.egg
 
-# ---- 运行时数据 ----
+# Local runtime data folders
 vpngate_data/
 logs/
 *.log
 *.tmp
-*.pid
 
-# ---- IDE 和编辑器 ----
+# IDE settings
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.project
-.classpath
-.settings/
-
-# ---- AI 编码助手 ----
 .gemini/
-.cursor/
 .cursorrules
-.aider*
-.codeium/
-.continue/
-.copilot/
 
-# ---- 本地开发文档（不上传 GitHub） ----
-AI开发指令.md
-功能文档.md
-AimiliVPN_Analysis_ZH.md
 
-# ---- 临时和测试文件 ----
+# Scratch and test files containing credentials
 scratch/
 *连接配置*
-test_*.py
-*.bak
-*.orig
 
-# ---- 系统文件 ----
-.DS_Store
-Thumbs.db
-Desktop.ini
+# Local analysis and doc files
+AimiliVPN_Analysis_ZH.md
+

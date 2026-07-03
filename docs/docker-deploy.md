@@ -62,22 +62,19 @@ curl https://api.ipify.org
 curl -x socks5h://127.0.0.1:8317 http://api.ipify.org --max-time 10
 ```
 
-## Wider Public Node Mode
+## Clean Public Node Mode
 
-Docker defaults to a wider public-node profile:
+Docker defaults to a cleaner public-node profile:
 
 ```yaml
 PUBLICVPNLIST_URL: https://publicvpnlist.com/
-PUBLICVPNLIST_LIMIT: "100"
-VPNBOOK_ENABLED: "1"
-VPNBOOK_LIMIT: "40"
-VPNBOOK_PROTOCOLS: tcp443,tcp80,udp53,udp25000
-ACCEPTED_EXIT_IP_TYPES: residential,mobile,normal,hosting
-MAX_SCAN_ROWS: "2000"
-MAX_NODE_SESSIONS: "0"
-MAX_NODE_PING: "0"
-MIN_NODE_SPEED: "0"
-DENY_NODE_IP_PREFIXES: ""
+PUBLICVPNLIST_LIMIT: "40"
+ACCEPTED_EXIT_IP_TYPES: residential,mobile
+MAX_SCAN_ROWS: "1000"
+MAX_NODE_SESSIONS: "30"
+MAX_NODE_PING: "350"
+MIN_NODE_SPEED: "1000000"
+DENY_NODE_IP_PREFIXES: 219.100.37.,219.100.36.
 ```
 
 Apply changes:
@@ -86,4 +83,4 @@ Apply changes:
 docker compose up -d --build
 ```
 
-This keeps PublicVPNList and VPNGate broad, and also adds VPNBook OpenVPN configs when available. Raise `PUBLICVPNLIST_LIMIT`, `VPNBOOK_LIMIT`, or `MAX_SCAN_ROWS` if you want an even larger candidate pool; set `VPNBOOK_ENABLED` to `0` to disable the VPNBook source.
+This skips busy public nodes, slow entries, and common VPNGate shared prefixes before testing. Lower `MAX_NODE_SESSIONS` for fewer users, or set it to `0` to disable the session limit.
