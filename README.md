@@ -4,8 +4,25 @@ Bilingual: [中文](#中文) | [English](#english)
 
 ---
 
-## 中文
+<a name="中文"></a>
+## 中文 (Chinese)
 
+AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN 代理网关。它以纯 Python 标准库编写，内置美观响应式的管理网页，提供智能并发测速、多路由模式、出站代理网关、实时日志等强大功能。
+
+---
+
+### 🌟 VPS 优选推荐：跑 AimiliVPN 更稳更省心
+[![BandwagonHost 顶级三网优化](https://img.shields.io/badge/BandwagonHost-%E9%A1%B6%E7%BA%A7%E4%B8%89%E7%BD%91%E4%BC%98%E5%8C%96-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
+[![RackNerd 6000GB 流量](https://img.shields.io/badge/RackNerd-6000GB%2F%E6%9C%88%20%E5%A4%A7%E6%B5%81%E9%87%8F-blue?style=for-the-badge)](https://my.racknerd.com/aff.php?aff=18708)
+
+| 推荐 | 适合谁 | 亮点 | 入口 |
+| --- | --- | --- | --- |
+| **BandwagonHost 搬瓦工** | 更看重国内访问质量、延迟和线路上限的用户 | **顶级三网优化线路**，适合对网络体验、跨境访问质量和长期稳定性要求更高的场景 | [立即查看](https://bandwagonhost.com/aff.php?aff=81790) |
+| **RackNerd** | 想低成本部署、测试、长期挂机的用户 | **每月 6000GB 流量**，价格实惠、配置给得足，适合入门部署和性价比优先的 VPS 需求 | [立即查看](https://my.racknerd.com/aff.php?aff=18708) |
+
+---
+
+### 📢 官方交流与反馈
 [![Telegram](https://img.shields.io/badge/TG交流群-arestemple-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/arestemple)
 [![Forum](https://img.shields.io/badge/交流论坛-339936.xyz-orange?style=flat-square&logo=discourse&logoColor=white)](https://339936.xyz)
 [![YouTube](https://img.shields.io/badge/视频教程-YouTube-red?style=flat-square&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=s-ATfXR8BpI)
@@ -13,168 +30,205 @@ Bilingual: [中文](#中文) | [English](#english)
 
 ---
 
-**AimiliVPN** 是一个专为 Linux VPS（如 Ubuntu）设计的智能 VPN 代理网关管理器。它能够自动采集 VPNGate 开放节点，进行多线程可用性测试与延迟过滤，利用 OpenVPN 隧道与策略路由（Policy Routing）实现出站网络，并在本地提供高性能的 HTTP/SOCKS5 代理网关服务，适合用作 Xray 的落地出站代理。
+### 🚀 一键极速部署 (支持 Debian/Ubuntu/CentOS/Alpine 等 Linux 系统)
 
----
+在您的 Linux VPS 上以 root 用户执行以下对应命令：
 
-### 🚀 快速开始
-
-在您的 **Ubuntu** VPS 机器上，复制并运行以下一行指令即可完成自动安装部署：
-
+#### 🌟 正式稳定版本 (main 分支)
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
 ```
+> 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
 ---
 
-### 🛠️ 快捷命令行 (CLI)
+### 💡 快速使用指南 (小白必看)
 
-安装成功后，系统会在全局注册 `ml` 快捷管理指令，直接运行 `ml` 可打开图形化交互终端，也可通过以下指令执行：
-* **`ml status`** 或 **`ml`**：查看当前运行状态（代理端口、活动 VPN 节点、直连延迟、网页后台登录地址等）。
-* **`ml start`**：启动 AimiliVPN 服务。
-* **`ml stop`**：停止 AimiliVPN 服务（并自动清理策略路由与 OpenVPN 进程）。
-* **`ml restart`**：重启服务。
-* **`ml logs`**：查看实时的 Systemd 服务运行日志。
-* **`ml web`**：切换网页绑定地址（127.0.0.1 仅本地，或 0.0.0.0 允许公网访问）与重置安全后缀。
-* **`ml port`**：修改网页管理控制台监听端口。
-* **`ml password`**：生成新的 12 位安全管理密码。
-* **`ml uninstall`**：完全卸载服务并清理相关环境。
+部署成功后，如何使用它进行科学上网？
 
-#### 💡 首次安装与常见报错解决（小白必看）
+#### 第一步：登录 Web 管理后台
+打开浏览器，访问部署完成时提示的专属后台地址（含安全后缀），即可进入精美的暗黑玻璃拟物风管理界面。
 
-##### 1. 极简系统缺少依赖（Ubuntu 18-26 / Debian 首次安装）
-如果系统是全新纯净版，可能会因为缺少 `curl` 或 `ca-certificates` 导致一键安装脚本下载失败。请在安装前执行以下命令补充依赖：
-```bash
-sudo apt-get update && sudo apt-get install -y curl ca-certificates
-```
+#### 第二步：获取并连接节点
+1. 首次进入后台，节点列表可能正在进行首次自动测速与拉取。
+2. 点击 **“更新节点”** 按钮（或通过网页下方的网关/日志进行状态检查），程序会在后台通过多线程并发测速，自动筛选出延迟最低、可连接的 VPNGate 节点。
+3. 选择您喜欢的出站路由模式：
+   - **智能自动配置**（推荐）：如果当前连接的节点失效，系统会在数秒内自动漂移连接至其他备用健康节点，无需手动干预。
+   - **固定国家地区**：只选择指定国家（如日本 JP、韩国 KR、美国 US）的最佳节点。
+   - **固定 IP 节点**：始终锁定连接到这一个特定节点。
 
-##### 2. Debian 系统兼容运行方法
-本脚本一键包默认限制在 Ubuntu 系统运行。Debian 用户如需运行，可先下载并用 `sed` 临时将系统类型限制替换为 `"ubuntu"` 后再执行安装：
-```bash
-curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh -o install.sh
-sed -i 's/"${ID:-}"/"ubuntu"/g' install.sh
-sudo bash install.sh
-```
+#### 第三步：使用本机代理 (核心步骤)
+为了防止代理端口暴露至公网被恶意扫描和滥用，AimiliVPN 的双效代理服务（默认端口 **`7928`**，自适应支持 SOCKS5 和 HTTP 协议）**默认仅绑定在本地回环地址（`127.0.0.1`）**，只接收 VPS 本机上的流量，不对外机提供代理。
 
-##### 3. 包管理器被占用（Apt 锁冲突报错解决）
-若一键安装提示 `Could not get lock /var/lib/dpkg/lock-frontend` 等“无法获得锁”的报错，可运行以下命令解除占用并重新安装：
-```bash
-# 1. 停止自动更新服务并终止相关进程
-sudo systemctl stop unattended-upgrades 2>/dev/null
-sudo killall apt apt-get dpkg 2>/dev/null
+* **🐍 Python 脚本中使用代理**:
+  ```python
+  import requests
+  proxies = {
+      "http": "http://127.0.0.1:7928",
+      "https": "http://127.0.0.1:7928",
+  }
+  response = requests.get("https://www.google.com", proxies=proxies)
+  ```
+* **🐚 Shell 终端环境中使用代理**:
+  在命令行执行以下命令，可以让当前终端的后续命令（如 `curl`、`wget` 等）走代理出口：
+  ```bash
+  export http_proxy="http://127.0.0.1:7928"
+  export https_proxy="http://127.0.0.1:7928"
+  ```
+* **⚙️ 本地其他服务配置**:
+  将本机的其他代理工具、爬虫框架或服务的出战代理设置为 `127.0.0.1:7928`。
 
-# 2. 清理残留锁文件
-sudo rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-
-# 3. 修复受损包并重新更新源
-sudo dpkg --configure -a
-sudo apt-get update
-```
-执行完毕后，重新运行一键安装脚本即可。
+> 💡 **小贴士**：如果您确实需要对公网其他设备开放此代理端口，可以通过设置环境变量 `export LOCAL_PROXY_HOST="::"` 重新启动服务以允许公网接入。
 
 ---
 
-### ⚙️ 系统架构
+### 🛠️ 核心功能与操作说明
 
-```
-   [ 3x-ui / Xray ] 
-         │ (HTTP / SOCKS5)
-         ▼
-   [ 本地代理服务器 ] (Port 8317) ──(强制绑定 SO_BINDTODEVICE)──► [ tun0 虚拟网卡 ]
-         │                                                            │
-         │ (SSH, Web UI, etc. 依然走物理路由)                           │ (策略路由表 100)
-         ▼                                                            ▼
-   [ 物理网卡 eth0 ] ◄───────────────────────────────────────── [ OpenVPN 加密隧道 ]
-         │                                                            │
-         ▼ (真实服务器 IP 出站)                                         ▼ (VPNGate 落地节点出站)
-    (国内直连流量)                                               (解锁流媒体、锁区网站)
-```
+* **合并操作面板**：将“更新节点”与“立即检测补齐”合并，一键触发多线程拉取与测速。
+* **网关状态面板**：
+  - **系统诊断**：检测网关心跳及后台各个子守护线程（网页服务、VPN连接管理、出站网关服务）是否正常运行。若有脚本未运行，会提示具体的异常原因。
+  - **本地代理出口检测**：在网页端直接一键检测 VPS 后台对海外的实际连通状况，并回显真实的代理出站 IP 和所在地理位置。
+* **日志追踪面板**：
+  - **分类过滤**：可精准筛选查看特定功能的日志（如 VPN 连接日志、API 请求日志、系统异常等）。
+  - **实时滚动与管理**：日志实时滚动加载，支持一键复制代码、一键导出 `.log` 日志文件到本地。
 
 ---
 
+### ⚠️ 小白安装与运行常见问题 (FAQ)
+
+#### 1. 提示 `Cannot allocate tun` 或 `Cannot open tun/tap dev`
+* **原因**：VPS 宿主机未启用虚拟网卡（TUN/TAP 设备）。这种情况常见于 LXC 或 OpenVZ 架构的轻量 VPS。
+* **解决办法**：请登录您的 VPS 服务商控制面板（如 SolusVM/Proxmox），找到 **Enable TUN/TAP** / **开启 TUN** 选项并启用，然后重启 VPS。如无此选项，请工单联系客服开启。
+
+#### 2. 网页管理后台无法打开（链接超时或拒绝连接）
+* **原因 1**：VPS 本身自带防火墙（如 UFW、firewalld 或 iptables）阻断了管理端口（默认 `8787`）或代理端口（默认 `7928`）。
+* **解决办法 1**：请在终端放行对应端口：
+  * **UFW (Ubuntu/Debian)**: `ufw allow 8787/tcp && ufw allow 7928/tcp`
+  * **Firewalld (CentOS/RHEL)**: `firewall-cmd --zone=public --add-port=8787/tcp --permanent && firewall-cmd --zone=public --add-port=7928/tcp --permanent && firewall-cmd --reload`
+* **原因 2**：云服务商的“安全组”或“网络访问控制列表 (ACL)”未放行端口。
+* **解决办法 2**：**非常重要！** 登录云服务商控制台（如阿里云、腾讯云、AWS、Oracle Cloud等），找到您 VPS 实例的 **安全组规则 (Security Group)**，在入站规则中添加：
+  - **协议类型**: `TCP`
+  - **端口范围**: `8787` (管理网页) 和 `7928` (代理端口)
+  - **授权对象/源IP**: `0.0.0.0/0` (允许所有人，或指定您自己的家庭公网 IP 提高安全性)
+
+#### 3. 页面提示 `API Domain Blocked` 且备选节点显示为 0
+* **原因**：您的 VPS DNS 解析异常，或者官方 VPNGate 域名遭防火墙拦截污染，导致无法下载节点列表。
+* **解决办法**：
+  * **设置上游代理**：如果您有其他可用的代理服务，可在网页管理面板中打开“管理员 -> 代理及网络设置”，配置有效的 HTTP/SOCKS5 上游代理，后台会自动通过该代理拉取更新。
+  * **修改 DNS 解析器**：在终端修改 `/etc/resolv.conf`，将域名服务器替换为公共 DNS（如 `nameserver 8.8.8.8` 和 `nameserver 1.1.1.1`）。
+
+#### 4. VPN 已成功连接，但客户端设置代理后无法上网 (无流量)
+* **原因**：部分系统启用了严格的反向路径过滤（`rp_filter`），导致策略路由的入站/出站数据包被系统误判丢弃。
+* **解决办法**：在终端输入 `ml` 命令打开交互菜单，工具会自动检测并提示您将 `rp_filter` 修复为宽松模式（值为 `2`）。
+
+---
+
+### 🎁 捐赠支持项目开发
+
+如果您觉得这个项目对您有所帮助，欢迎捐赠支持我们的后续开发与维护：
+
+* **BNB (BSC / BEP20)**: `0xB6d78c42CEB0687A31B8cfEBE4b51b6eB8953C17`
+* **TRX (TRC20)**: `TSdzCW6JvsrqcppodYjhSrku4mYmDJ9pxf`
+
+感谢您的慷慨与支持！❤️
+
+---
+
+<a name="english"></a>
 ## English
 
-[![Telegram](https://img.shields.io/badge/Telegram-arestemple-2CA5E0?style=flat-square&logo=telegram&logoColor=white)](https://t.me/arestemple)
-[![Forum](https://img.shields.io/badge/Forum-339936.xyz-orange?style=flat-square&logo=discourse&logoColor=white)](https://339936.xyz)
-[![Email](https://img.shields.io/badge/Bug%20Report-yaohunse7@gmail.com-red?style=flat-square&logo=gmail&logoColor=white)](mailto:yaohunse7@gmail.com)
+AimiliVPN is a high-performance, zero-dependency VPN proxy gateway built entirely using Python's standard library. It parses official VPNGate servers, benchmarks latency, and routes traffic through a built-in dual-protocol (HTTP/SOCKS5) proxy server.
+
+### 🌟 Recommended VPS Deals
+[![BandwagonHost Premium Optimized Routes](https://img.shields.io/badge/BandwagonHost-Premium%20Optimized%20Routes-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
+[![RackNerd 6000GB Bandwidth](https://img.shields.io/badge/RackNerd-6000GB%2Fmonth%20Bandwidth-blue?style=for-the-badge)](https://my.racknerd.com/aff.php?aff=18708)
+
+| Pick | Best for | Highlights | Link |
+| --- | --- | --- | --- |
+| **BandwagonHost** | Users who care most about China connectivity, latency, and route quality | **Premium China Telecom/Unicom/Mobile optimized routes**, ideal for demanding cross-border networking and long-term use | [View deals](https://bandwagonhost.com/aff.php?aff=81790) |
+| **RackNerd** | Budget deployments, testing, and long-running lightweight services | **6000GB monthly bandwidth**, affordable pricing, and generous specs for value-focused VPS use | [View deals](https://my.racknerd.com/aff.php?aff=18708) |
+
+
+### 📢 Community & Feedback
+- **Telegram Group**: [arestemple](https://t.me/arestemple)
+- **Discussion Forum**: [339936.xyz](https://339936.xyz)
+- **Video Tutorial**: [YouTube Guide](https://www.youtube.com/watch?v=s-ATfXR8BpI)
+- **Email Contact**: yaohunse7@gmail.com
 
 ---
 
-**AimiliVPN** is an intelligent VPN proxy gateway manager designed specifically for Linux VPS (e.g. Ubuntu). It automatically collects open VPNGate nodes, conducts multi-threaded availability testing and latency filtering, establishes secure out-of-band routing via OpenVPN and policy routing to **prevent VPS lockouts**, and hosts a high-performance local SOCKS5/HTTP proxy gateway. It is highly optimized to serve as a residential/unlocked egress node for upstream proxies like 3x-ui / Xray.
+### 🚀 One-Click Installation
 
-### ✨ Key Features
+Run the corresponding command on your Linux VPS as root:
 
-1. ⚡ **Auto-Collection & Multi-Threaded Probing**:
-   * Periodically fetches candidate nodes from PublicVPNList and VPNGate.
-   * Pulls from PublicVPNList first, falls back to VPNGate, filters busy/shared public pools, then performs concurrent ping latency and handshake tests.
-2. 🔒 **Anti-Lockout Routing (Policy Routing)**:
-   * Directs traffic from the virtual adapter `tun0` to a customized routing table (Table 100) without altering the system's default gateway.
-   * Keeps SSH sessions and server administration panels unaffected by the active VPN.
-3. 🚫 **Fail-Safe Leak Protection**:
-   * Outbound socket connections inside the local proxy server are strictly bound to `tun0` via `SO_BINDTODEVICE`.
-   * If the VPN disconnects, proxy requests are instantly blocked with a `502 Bad Gateway` instead of falling back to the VPS physical IP address.
-4. 🖥️ **Modern Web UI Panel**:
-   * Sleek dark/light responsive console (default port `6379`).
-   * Provides real-time geolocation, ISP, ASN, latency, and IP-type (residential/datacenter) detection.
-   * Enables manual node selection, blacklist resets, proxy speed-testing, and logs query.
-   * Secured by a random secret path suffix (e.g., `/EJsW2EeBo9lY/`) and password authentication.
-5. 🛠️ **CLI Utility (ml)**:
-   * Command-line helper tool `ml` with a menu-driven interface.
-   * Provides quick statuses, starts/stops the daemon, resets passwords, and changes bind hosts.
-
----
-
-### 🚀 Quick Start
-
-To install and deploy AimiliVPN on your **Ubuntu** server, copy and paste the following command:
-
+#### 🌟 Stable Release (main branch)
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
 ```
 
+> 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
+
 ---
 
-### 🛠️ CLI Helper Commands
+### 💡 Quick Start Guide
 
-Once installed, use the global command `ml` to launch the interactive helper menu, or use the shortcuts below:
-* **`ml status`** or **`ml`**: Check running system status (active nodes, proxy ports, latency, URLs).
-* **`ml start`**: Start the gateway service.
-* **`ml stop`**: Stop the gateway service (and clean routing tables).
-* **`ml restart`**: Restart the service.
-* **`ml logs`**: View real-time Systemd output logs.
-* **`ml web`**: Toggle Web UI accessibility (127.0.0.1 or 0.0.0.0) and reset suffix paths.
-* **`ml port`**: Update the Web Console port.
-* **`ml password`**: Regenerate a secure 12-character administration password.
-* **`ml uninstall`**: Completely remove the service and repository files from your VPS.
+#### Step 1: Access the Web UI
+Open your browser and navigate to the printed URL (e.g. `http://your_vps_ip:8787/u71e9IXp4TPx`).
 
-#### 💡 Troubleshooting & First-Time Installation Tips
+#### Step 2: Select Node and Mode
+1. Wait for the program to complete its first automatic node speed benchmarks.
+2. Under "Admin", you can trigger node fetching. The backend concurrently tests official VPNGate nodes and ranks them by latency.
+3. Switch routes mode (Smart Auto, Specific Region, or Specific Server Node) according to your needs.
 
-##### 1. Missing Dependencies on Minimal OS (Ubuntu / Debian)
-If you are using a brand new minimal OS, the installation might fail due to missing `curl` or `ca-certificates`. Run the following command to pre-install dependencies:
-```bash
-sudo apt-get update && sudo apt-get install -y curl ca-certificates
-```
+#### Step 3: Use Localhost Proxy (Core Step)
+To prevent unauthorized scanning and abuse of the proxy port on the public internet, the built-in HTTP/SOCKS5 proxy server (default port **`7928`**) **binds to localhost (`127.0.0.1`) by default**. It is designed to route traffic generated locally on the VPS, rather than acting as a public proxy server.
 
-##### 2. Bypass OS Restrictions for Debian
-The script is restricted to Ubuntu by default. For Debian systems, run the following commands to download, patch, and install:
-```bash
-curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh -o install.sh
-sed -i 's/"${ID:-}"/"ubuntu"/g' install.sh
-sudo bash install.sh
-```
+* **🐍 Proxy in Python**:
+  ```python
+  import requests
+  proxies = {
+      "http": "http://127.0.0.1:7928",
+      "https": "http://127.0.0.1:7928",
+  }
+  response = requests.get("https://www.google.com", proxies=proxies)
+  ```
+* **🐚 Proxy in Shell terminal**:
+  ```bash
+  export http_proxy="http://127.0.0.1:7928"
+  export https_proxy="http://127.0.0.1:7928"
+  ```
+* **⚙️ Other local services**:
+  Configure your scrapers, frameworks, or utility tools on this VPS to send traffic via `127.0.0.1:7928`.
 
-##### 3. Package Manager Locked (`apt`/`dpkg` Lock Errors)
-If you see `Could not get lock /var/lib/dpkg/lock-frontend` or similar busy errors, run these commands to unlock and retry:
-```bash
-# 1. Stop automatic upgrades & kill active processes
-sudo systemctl stop unattended-upgrades 2>/dev/null
-sudo killall apt apt-get dpkg 2>/dev/null
+> 💡 **Quick Note**: If you really need to open this proxy port to the public internet, you can set the environment variable `export LOCAL_PROXY_HOST="::"` before running the manager.
 
-# 2. Remove lock files
-sudo rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+---
 
-# 3. Repair package states & update
-sudo dpkg --configure -a
-sudo apt-get update
-```
-Once done, re-run the installation script.
+### ⚠️ Common Troubleshooting (FAQ)
+
+#### 1. Error: `Cannot allocate tun` or `Cannot open tun/tap dev`
+* **Reason**: Virtual network adapter (TUN/TAP device) is disabled. This is common in OpenVZ/LXC VPS instances.
+* **Solution**: Enable **TUN/TAP** in your VPS SolusVM/KiwiVM control panel, or submit a support ticket to your hosting provider.
+
+#### 2. Cannot open the Web UI in the browser
+* **Reason 1**: The built-in firewall (UFW or firewalld) is blocking ports `8787` (Web UI) and `7928` (Proxy).
+* **Solution 1**: Allow the ports in your OS firewall:
+  * **UFW**: `ufw allow 8787/tcp && ufw allow 7928/tcp`
+  * **Firewalld**: `firewall-cmd --add-port=8787/tcp --permanent && firewall-cmd --add-port=7928/tcp --permanent && firewall-cmd --reload`
+* **Reason 2**: Service provider security group blocking ports.
+* **Solution 2**: **Crucial!** Log in to your cloud provider console (AWS, Aliyun, Oracle Cloud, etc.), locate the **Security Group** for your instance, and add an inbound TCP rule to allow ports `8787` and `7928` from `0.0.0.0/0`.
+
+#### 3. "API Domain Blocked" / Candidate nodes pool is empty (0 nodes)
+* **Reason**: The official VPNGate domain is blocked or DNS resolution failed on your VPS.
+* **Solution**: Add an HTTP/SOCKS5 upstream proxy in the settings panel (Admin -> Proxy Settings), or configure public DNS in `/etc/resolv.conf` (e.g., `nameserver 8.8.8.8`).
+
+---
+
+### 🎁 Donation Support
+
+If you find this project helpful, you can support its development and maintenance via donation:
+
+* **BNB (BSC / BEP20)**: `0xB6d78c42CEB0687A31B8cfEBE4b51b6eB8953C17`
+* **TRX (TRC20)**: `TSdzCW6JvsrqcppodYjhSrku4mYmDJ9pxf`
+
+Thank you for your generosity and support! ❤️
