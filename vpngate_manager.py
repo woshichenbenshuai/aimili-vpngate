@@ -1559,13 +1559,26 @@ def maintain_valid_nodes(force: bool = False, country_filter: str | None = None)
                     
         write_json(NODES_FILE, merged)
 
+    # Test the first 10 non-active nodes from the new list
+    with lock:
+        current_nodes = read_json(NODES_FILE, [])
+        to_test = [n for n in current_nodes if not n.get("active")][:10]
+        to_test_ids = [n["id"] for n in to_test]
+        
+    print(f"[维护线程] 正在检测新获取列表的前 10 个节点: {to_test_ids}", flush=True)
+    test_multiple_nodes(to_test_ids)
     
     with lock:
         merged = read_json(NODES_FILE, [])
-        valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
-    message = f"Fetched {len(candidates)} nodes. Waiting for manual testing."
+        if not active_openvpn_running():
+            available_candidates = [n for n in merged if n.get("probe_status") == "available"]
+            if available_candidates:
+                auto_switch_node()
+
+    valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
+    message = f"Fetched {len(candidates)} nodes. Tested first 10 nodes."
     if country_filter:
-        message = f"Fetched {len(candidates)} nodes for {country_filter}. Waiting for manual testing."
+        message = f"Fetched {len(candidates)} nodes for {country_filter}. Tested first 10 nodes."
     set_state(
         last_check_at=time.time(),
         last_check_message=message,
