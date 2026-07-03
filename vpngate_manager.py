@@ -1732,13 +1732,19 @@ def apply_routing_filters(
     if routing_ip_type == "residential":
         candidates = [
             n for n in candidates
-            if n.get("ip_type") in ("residential", "mobile")
+            if n.get("ip_type") == "residential"
+            or (include_unknown_ip_type and not n.get("ip_type"))
+        ]
+    elif routing_ip_type == "mobile":
+        candidates = [
+            n for n in candidates
+            if n.get("ip_type") == "mobile"
             or (include_unknown_ip_type and not n.get("ip_type"))
         ]
     elif routing_ip_type == "hosting":
         candidates = [
             n for n in candidates
-            if n.get("ip_type") == "hosting"
+            if n.get("ip_type") in ("hosting", "datacenter")
             or (include_unknown_ip_type and not n.get("ip_type"))
         ]
 
@@ -1784,9 +1790,11 @@ def validate_node_allowed_by_routing(node: dict[str, Any], ui_cfg: dict[str, Any
 
     routing_ip_type = ui_cfg.get("routing_ip_type", "all")
     node_ip_type = node.get("ip_type")
-    if routing_ip_type == "residential" and node_ip_type not in ("residential", "mobile"):
+    if routing_ip_type == "residential" and node_ip_type != "residential":
         raise RuntimeError("当前已锁定住宅 IP 出站，不能连接非住宅节点")
-    if routing_ip_type == "hosting" and node_ip_type != "hosting":
+    if routing_ip_type == "mobile" and node_ip_type != "mobile":
+        raise RuntimeError("当前已锁定移动 IP 出站，不能连接非移动节点")
+    if routing_ip_type == "hosting" and node_ip_type not in ("hosting", "datacenter"):
         raise RuntimeError("当前已锁定机房 IP 出站，不能连接非机房节点")
 
 def enforce_active_node_allowed_by_routing(ui_cfg: dict[str, Any], reason: str = "路由规则已更新") -> str | None:
@@ -3759,8 +3767,10 @@ INDEX_HTML = r"""<!doctype html>
     </select>
     <select id="ip_type_filter">
       <option value="">所有IP类型</option>
-      <option value="residential">住宅IP</option>
-      <option value="hosting">机房IP</option>
+      <option value="residential">家宽/住宅 IP</option>
+      <option value="mobile">移动 IP</option>
+      <option value="hosting">机房 IP</option>
+      <option value="unknown">未识别/待检测</option>
     </select>
     <button id="btn_favorites" class="toolbar-btn" type="button" onclick="toggleFavoritesView()" style="margin-left: auto; height: 42px; gap: 6px;">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -3929,15 +3939,19 @@ INDEX_HTML = r"""<!doctype html>
             <div class="option-group" id="routing_ip_type_group">
               <div class="option-card active" data-value="all" onclick="setRoutingIpType('all')">
                 <div class="option-card-title">所有IP</div>
-                <div class="option-card-desc">机房 + 住宅</div>
+                <div class="option-card-desc">不限制类型</div>
               </div>
               <div class="option-card" data-value="residential" onclick="setRoutingIpType('residential')">
-                <div class="option-card-title">住宅IP</div>
-                <div class="option-card-desc">静态家宽</div>
+                <div class="option-card-title">家宽/住宅 IP</div>
+                <div class="option-card-desc">优先家庭宽带</div>
+              </div>
+              <div class="option-card" data-value="mobile" onclick="setRoutingIpType('mobile')">
+                <div class="option-card-title">移动 IP</div>
+                <div class="option-card-desc">移动网络出口</div>
               </div>
               <div class="option-card" data-value="hosting" onclick="setRoutingIpType('hosting')">
-                <div class="option-card-title">机房IP</div>
-                <div class="option-card-desc">普通机房</div>
+                <div class="option-card-title">机房 IP</div>
+                <div class="option-card-desc">数据中心出口</div>
               </div>
             </div>
           </div>
@@ -4137,8 +4151,15 @@ const translateQuality = q => {
 };
 
 const translateIpType = t => {
-  const dict = {"residential": "住宅 IP", "hosting": "机房 IP", "mobile": "移动网", "proxy": "代理 IP"};
-  return dict[t] || t || "-";
+  const dict = {
+    "residential": "家宽/住宅 IP",
+    "hosting": "机房 IP",
+    "datacenter": "机房 IP",
+    "mobile": "移动 IP",
+    "proxy": "代理 IP",
+    "normal": "未识别/普通"
+  };
+  return dict[t] || t || "未识别";
 };
 
 const translateCountry = c => {
@@ -4256,10 +4277,17 @@ function getFilteredNodes() {
       return false;
     }
     if (selectedIpType) {
-      if (selectedIpType === "residential" && !["residential", "mobile"].includes(n.ip_type)) {
+      const ipType = (n.ip_type || "").toLowerCase();
+      if (selectedIpType === "residential" && ipType !== "residential") {
         return false;
       }
-      if (selectedIpType === "hosting" && n.ip_type !== "hosting") {
+      if (selectedIpType === "mobile" && ipType !== "mobile") {
+        return false;
+      }
+      if (selectedIpType === "hosting" && !["hosting", "datacenter"].includes(ipType)) {
+        return false;
+      }
+      if (selectedIpType === "unknown" && ["residential", "mobile", "hosting", "datacenter"].includes(ipType)) {
         return false;
       }
     }
@@ -6073,7 +6101,7 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_mode == "fixed_region" and not force_country:
                     self.send_json({"ok": False, "error": "启用固定地区前，请先选择一个要锁定的国家"}, HTTPStatus.BAD_REQUEST)
                     return
-                if routing_ip_type not in ("all", "residential", "hosting"):
+                if routing_ip_type not in ("all", "residential", "mobile", "hosting"):
                     self.send_json({"ok": False, "error": "无效的IP出站类型过滤"}, HTTPStatus.BAD_REQUEST)
                     return
                 
@@ -6135,7 +6163,7 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_mode == "fixed_region" and not force_country:
                     self.send_json({"ok": False, "error": "启用固定地区前，请先选择一个要锁定的国家"}, HTTPStatus.BAD_REQUEST)
                     return
-                if routing_ip_type not in ("all", "residential", "hosting"):
+                if routing_ip_type not in ("all", "residential", "mobile", "hosting"):
                     self.send_json({"ok": False, "error": "无效的IP出站类型过滤"}, HTTPStatus.BAD_REQUEST)
                     return
                 
