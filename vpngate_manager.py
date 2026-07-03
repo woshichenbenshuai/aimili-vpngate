@@ -37,11 +37,14 @@ import proxy_server
 
 API_URL = "https://www.vpngate.net/api/iphone/"
 PUBLICVPNLIST_URL = os.environ.get("PUBLICVPNLIST_URL", "https://publicvpnlist.com/")
-PUBLICVPNLIST_LIMIT = int(os.environ.get("PUBLICVPNLIST_LIMIT", "40"))
+PUBLICVPNLIST_LIMIT = int(os.environ.get("PUBLICVPNLIST_LIMIT", "0"))
+IPSPEED_ENABLED = os.environ.get("IPSPEED_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+IPSPEED_URL = os.environ.get("IPSPEED_URL", "https://ipspeed.info/free-openvpn.php")
+IPSPEED_LIMIT = int(os.environ.get("IPSPEED_LIMIT", "0"))
 FETCH_INTERVAL_SECONDS = int(os.environ.get("FETCH_INTERVAL_SECONDS", "960"))
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "960"))
 TARGET_VALID_NODES = int(os.environ.get("TARGET_VALID_NODES", "3"))
-MAX_SCAN_ROWS = int(os.environ.get("MAX_SCAN_ROWS", "1000"))
+MAX_SCAN_ROWS = int(os.environ.get("MAX_SCAN_ROWS", "0"))
 OPENVPN_TEST_TIMEOUT_SECONDS = int(os.environ.get("OPENVPN_TEST_TIMEOUT_SECONDS", "35"))
 OPENVPN_CMD = os.environ.get("OPENVPN_CMD", "openvpn")
 OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
@@ -52,17 +55,18 @@ UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
 UI_PORT = int(os.environ.get("UI_PORT", "6379"))
 INVALID_BACKOFF_SECONDS = int(os.environ.get("INVALID_BACKOFF_SECONDS", str(30 * 60)))
 BLACKLIST_TTL_SECONDS = int(os.environ.get("BLACKLIST_TTL_SECONDS", str(6 * 60 * 60)))
-MAX_NODE_SESSIONS = int(os.environ.get("MAX_NODE_SESSIONS", "30"))
-MAX_NODE_PING = int(os.environ.get("MAX_NODE_PING", "350"))
-MIN_NODE_SPEED = int(os.environ.get("MIN_NODE_SPEED", "1000000"))
+MAX_NODE_SESSIONS = int(os.environ.get("MAX_NODE_SESSIONS", "0"))
+MAX_NODE_PING = int(os.environ.get("MAX_NODE_PING", "0"))
+MIN_NODE_SPEED = int(os.environ.get("MIN_NODE_SPEED", "0"))
+NODE_STORE_LIMIT = int(os.environ.get("NODE_STORE_LIMIT", "0"))
 DENY_NODE_IP_PREFIXES = tuple(
     item.strip()
-    for item in os.environ.get("DENY_NODE_IP_PREFIXES", "219.100.37.,219.100.36.").split(",")
+    for item in os.environ.get("DENY_NODE_IP_PREFIXES", "").split(",")
     if item.strip()
 )
 ACCEPTED_EXIT_IP_TYPES = {
     item.strip().lower()
-    for item in os.environ.get("ACCEPTED_EXIT_IP_TYPES", "residential,mobile").split(",")
+    for item in os.environ.get("ACCEPTED_EXIT_IP_TYPES", "residential,mobile,normal,hosting,proxy").split(",")
     if item.strip()
 }
 
@@ -281,16 +285,19 @@ def get_state() -> dict[str, Any]:
     state["is_connecting"] = is_connecting
     state.setdefault("api_url", API_URL)
     state.setdefault("target_valid_nodes", TARGET_VALID_NODES)
-    state.setdefault("publicvpnlist_url", PUBLICVPNLIST_URL)
-    state.setdefault("publicvpnlist_limit", PUBLICVPNLIST_LIMIT)
-    state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
-    state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
-    state.setdefault("local_proxy", f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}")
-    state.setdefault("accepted_exit_ip_types", sorted(ACCEPTED_EXIT_IP_TYPES))
-    state.setdefault("max_node_sessions", MAX_NODE_SESSIONS)
-    state.setdefault("max_node_ping", MAX_NODE_PING)
-    state.setdefault("min_node_speed", MIN_NODE_SPEED)
-    state.setdefault("deny_node_ip_prefixes", list(DENY_NODE_IP_PREFIXES))
+    state["publicvpnlist_url"] = PUBLICVPNLIST_URL
+    state["publicvpnlist_limit"] = PUBLICVPNLIST_LIMIT
+    state["ipspeed_enabled"] = IPSPEED_ENABLED
+    state["ipspeed_url"] = IPSPEED_URL
+    state["ipspeed_limit"] = IPSPEED_LIMIT
+    state["fetch_interval_seconds"] = FETCH_INTERVAL_SECONDS
+    state["check_interval_seconds"] = CHECK_INTERVAL_SECONDS
+    state["local_proxy"] = f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}"
+    state["accepted_exit_ip_types"] = sorted(ACCEPTED_EXIT_IP_TYPES)
+    state["max_node_sessions"] = MAX_NODE_SESSIONS
+    state["max_node_ping"] = MAX_NODE_PING
+    state["min_node_speed"] = MIN_NODE_SPEED
+    state["deny_node_ip_prefixes"] = list(DENY_NODE_IP_PREFIXES)
     state.setdefault("last_fetch_status", "not_started")
     state.setdefault("last_check_message", "")
     state.setdefault("blacklisted_nodes", 0)
@@ -312,6 +319,11 @@ def parse_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+def limit_items(items: list[Any], limit: int) -> list[Any]:
+    if limit <= 0:
+        return items
+    return items[:limit]
 
 def fetch_api_text() -> str:
     return fetch_text_url(API_URL, accept="text/plain,*/*")
@@ -623,6 +635,76 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict
         "probed_at": 0,
     }
 
+def parse_ipspeed_entries(html: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    row_pattern = re.compile(r"<tr\b[^>]*>(?P<row>.*?)</tr>", re.IGNORECASE | re.DOTALL)
+    cell_pattern = re.compile(r"<t[dh]\b[^>]*>(?P<cell>.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+    href_pattern = re.compile(r'href=["\'](?P<href>[^"\']+\.ovpn)["\']', re.IGNORECASE)
+    for row_match in row_pattern.finditer(html):
+        row_html = row_match.group("row")
+        href_match = href_pattern.search(row_html)
+        if not href_match:
+            continue
+        cells = [
+            html_lib.unescape(re.sub(r"<[^>]+>", " ", cell_match.group("cell"))).strip()
+            for cell_match in cell_pattern.finditer(row_html)
+        ]
+        if len(cells) < 5:
+            continue
+        config_url = urllib.parse.urljoin(IPSPEED_URL, href_match.group("href"))
+        if config_url in seen_urls:
+            continue
+        seen_urls.add(config_url)
+        filename = urllib.parse.unquote(config_url.rsplit("/", 1)[-1])
+        ip = filename[:-5] if filename.lower().endswith(".ovpn") else filename
+        entries.append(
+            {
+                "country": cells[1],
+                "config_url": config_url,
+                "ip": ip,
+                "uptime": cells[3],
+                "ping": parse_int(cells[4].replace("ms", "").strip()),
+            }
+        )
+    return entries
+
+def ipspeed_entry_to_node(entry: dict[str, Any], config_text: str) -> dict[str, Any]:
+    ip = str(entry.get("ip") or "")
+    country_name = str(entry.get("country") or "")
+    country_display = country_display_name(country_name) or country_name
+    remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, ip)
+    node_id = safe_name("_".join(["IPS", ip or remote_host, str(remote_port), proto]))
+    config_path = CONFIG_DIR / f"{node_id}.ovpn"
+    return {
+        "id": node_id,
+        "source": "ipspeed",
+        "country": country_display,
+        "country_short": "",
+        "host_name": "",
+        "ip": ip,
+        "score": 0,
+        "ping": parse_int(entry.get("ping")),
+        "speed": 0,
+        "sessions": 0,
+        "owner": "",
+        "asn": "",
+        "as_name": "",
+        "location": "",
+        "ip_type": "",
+        "quality": "",
+        "latency_ms": 0,
+        "config_file": str(config_path),
+        "config_text": config_text,
+        "proto": proto,
+        "remote_host": remote_host,
+        "remote_port": remote_port,
+        "fetched_at": time.time(),
+        "probe_status": "not_checked",
+        "probe_message": "",
+        "probed_at": 0,
+    }
+
 def fetch_publicvpnlist_candidates(
     blacklist: dict[str, dict[str, Any]],
     seen_ips: set[str],
@@ -661,7 +743,7 @@ def fetch_publicvpnlist_candidates(
             if country_matches(country_filter, entry.get("country"), entry.get("code")):
                 entries.append(entry)
 
-    for entry in entries[:PUBLICVPNLIST_LIMIT]:
+    for entry in limit_items(entries, PUBLICVPNLIST_LIMIT):
         ip = str(entry.get("ip") or entry.get("host") or "")
         if not ip or ip in seen_ips:
             continue
@@ -671,6 +753,45 @@ def fetch_publicvpnlist_candidates(
         except Exception as exc:
             rejected["download_failed"] = rejected.get("download_failed", 0) + 1
             print(f"[publicvpnlist] failed to download {entry.get('id')}: {exc}", flush=True)
+            continue
+        if is_blacklisted(node, blacklist):
+            rejected["blacklisted"] = rejected.get("blacklisted", 0) + 1
+            continue
+        reject_reason = clean_candidate_reject_reason(node)
+        if reject_reason:
+            rejected[reject_reason] = rejected.get(reject_reason, 0) + 1
+            continue
+        nodes.append(node)
+        seen_ips.add(ip)
+    return nodes, rejected
+
+def fetch_ipspeed_candidates(
+    blacklist: dict[str, dict[str, Any]],
+    seen_ips: set[str],
+    country_filter: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    rejected: dict[str, int] = {}
+    nodes: list[dict[str, Any]] = []
+    if not IPSPEED_ENABLED:
+        return nodes, rejected
+
+    html = fetch_text_url(IPSPEED_URL, timeout=45)
+    entries = []
+    for entry in parse_ipspeed_entries(html):
+        if country_filter and not country_matches(country_filter, entry.get("country")):
+            continue
+        entries.append(entry)
+
+    for entry in limit_items(entries, IPSPEED_LIMIT):
+        ip = str(entry.get("ip") or "")
+        if not ip or ip in seen_ips:
+            continue
+        try:
+            config_text = fetch_text_url(str(entry["config_url"]), timeout=30, accept="application/x-openvpn-profile,text/plain,*/*")
+            node = ipspeed_entry_to_node(entry, config_text)
+        except Exception as exc:
+            rejected["download_failed"] = rejected.get("download_failed", 0) + 1
+            print(f"[ipspeed] failed to download {entry.get('config_url')}: {exc}", flush=True)
             continue
         if is_blacklisted(node, blacklist):
             rejected["blacklisted"] = rejected.get("blacklisted", 0) + 1
@@ -704,6 +825,18 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
         print(f"[publicvpnlist] source failed: {exc}", flush=True)
         log_to_json("WARNING", "Main", f"PublicVPNList source failed: {exc}")
 
+    log_to_json("INFO", "Main", "Fetching IPSpeed candidates...")
+    try:
+        ips_nodes, ips_rejected = fetch_ipspeed_candidates(blacklist, seen_ips, country_filter)
+        candidates.extend(ips_nodes)
+        for key, value in ips_rejected.items():
+            rejected[f"ipspeed_{key}"] = rejected.get(f"ipspeed_{key}", 0) + value
+        log_to_json("INFO", "Main", f"IPSpeed returned {len(ips_nodes)} clean candidates.")
+    except Exception as exc:
+        rejected["ipspeed_error"] = rejected.get("ipspeed_error", 0) + 1
+        print(f"[ipspeed] source failed: {exc}", flush=True)
+        log_to_json("WARNING", "Main", f"IPSpeed source failed: {exc}")
+
     log_to_json("INFO", "Main", "Fetching VPNGate candidates...")
     for i in range(max_attempts):
         if i > 0:
@@ -711,7 +844,7 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
         try:
             api_text = fetch_api_text()
             rows = parse_vpngate_rows(api_text)
-            for row in rows[:MAX_SCAN_ROWS]:
+            for row in limit_items(rows, MAX_SCAN_ROWS):
                 if country_filter and not country_matches(country_filter, row.get("CountryLong"), row.get("CountryShort")):
                     continue
                 ip = row.get("IP", "")
@@ -1413,8 +1546,8 @@ def maintain_valid_nodes(force: bool = False, country_filter: str | None = None)
                 merged.append(cand)
                 seen_ids.add(cand["id"])
                 
-        if len(merged) > 1000:
-            merged = merged[:1000]
+        if NODE_STORE_LIMIT > 0 and len(merged) > NODE_STORE_LIMIT:
+            merged = merged[:NODE_STORE_LIMIT]
             
         for n in merged:
             config_path = Path(n["config_file"])
@@ -2374,10 +2507,6 @@ INDEX_HTML = r"""<!doctype html>
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
       更新节点
     </button>
-    <button id="check" class="btn-primary">
-      <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18.5" /></svg>
-      立即检测补齐
-    </button>
     <div class="dropdown">
       <button id="admin_btn" class="btn-primary" style="background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border-color); color: var(--text-primary);">
         <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
@@ -2406,10 +2535,19 @@ INDEX_HTML = r"""<!doctype html>
     <select id="country_filter">
       <option value="">所有国家</option>
     </select>
+    <select id="ip_type_filter">
+      <option value="">所有 IP 类型</option>
+      <option value="residential">住宅 IP</option>
+      <option value="mobile">移动网</option>
+      <option value="normal">普通</option>
+      <option value="hosting">机房 IP</option>
+      <option value="proxy">代理 IP</option>
+      <option value="unknown">未知</option>
+    </select>
     <input id="search" placeholder="输入国家、位置、IP、ASN、运营主体等过滤节点..." />
     <button id="btn_batch_test" class="btn-primary" style="height: 42px; padding: 0 20px; font-weight: 600; background: var(--primary-gradient);">
       <svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-      批量测试本页
+      批量测试当前列表
     </button>
   </section>
   <div class="table-wrapper">
@@ -2433,20 +2571,8 @@ INDEX_HTML = r"""<!doctype html>
       </table>
     </div>
     
-    <!-- 分页控制栏 -->
-    <div class="pagination-container" style="padding: 16px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border-color); flex-wrap: wrap; gap: 12px;">
-      <div style="font-size: 13px; color: var(--text-secondary);">
-        显示第 <span id="page_start" style="color: var(--text-primary); font-weight:600;">0</span> - <span id="page_end" style="color: var(--text-primary); font-weight:600;">0</span> 条，共 <span id="filtered_count" style="color: var(--text-primary); font-weight:600;">0</span> 条备选节点
-      </div>
-      <div style="display: flex; gap: 8px; align-items: center;">
-        <button id="btn_first_page" class="connect-btn" style="height: 32px; padding: 0 10px;">首页</button>
-        <button id="btn_prev_page" class="connect-btn" style="height: 32px; padding: 0 10px;">上一页</button>
-        <span style="font-size: 13px; color: var(--text-secondary); margin: 0 8px;">
-          页码 <strong id="current_page_val" style="color: var(--primary);">1</strong> / <strong id="total_pages_val">1</strong>
-        </span>
-        <button id="btn_next_page" class="connect-btn" style="height: 32px; padding: 0 10px;">下一页</button>
-        <button id="btn_last_page" class="connect-btn" style="height: 32px; padding: 0 10px;">尾页</button>
-      </div>
+    <div class="table-summary" style="padding: 16px; border-top: 1px solid var(--border-color); font-size: 13px; color: var(--text-secondary);">
+      当前显示 <span id="filtered_count" style="color: var(--text-primary); font-weight:600;">0</span> 条备选节点
     </div>
   </div>
 
@@ -2515,9 +2641,7 @@ INDEX_HTML = r"""<!doctype html>
 </main>
 <script>
 let nodes=[], state={}, testingNodeIds = new Set();
-let currentPage = 1;
-const pageSize = 11;
-let currentPageNodes = [];
+let currentVisibleNodes = [];
 let nodesRefreshInFlight = null;
 let countryRefreshTimer = null;
 let countryRefreshAttempts = 0;
@@ -2534,13 +2658,14 @@ const translateQuality = q => {
 };
 
 const translateIpType = t => {
-  const dict = {"residential": "住宅 IP", "hosting": "机房 IP", "mobile": "移动网", "proxy": "代理 IP"};
+  const dict = {"residential": "住宅 IP", "hosting": "机房 IP", "mobile": "移动网", "proxy": "代理 IP", "normal": "普通", "unknown": "未知"};
   return dict[t] || t || "-";
 };
 
 const translateSource = s => {
   const normalized = String(s || "").toLowerCase();
   if (normalized === "publicvpnlist") return "PublicVPNList";
+  if (normalized === "ipspeed") return "IPSpeed";
   if (normalized === "vpngate") return "VPNGate";
   return s || "VPNGate";
 };
@@ -2673,8 +2798,13 @@ function updateCountryFilter() {
 function getFilteredNodes() {
   const q = $("search").value.toLowerCase();
   const selectedCountry = $("country_filter").value;
+  const selectedIpType = $("ip_type_filter").value;
   return nodes.filter(n => {
     if (selectedCountry && translateCountry(n.country) !== selectedCountry) {
+      return false;
+    }
+    const nodeIpType = String(n.ip_type || "unknown").toLowerCase();
+    if (selectedIpType && nodeIpType !== selectedIpType) {
       return false;
     }
     const searchStr = [
@@ -2815,20 +2945,13 @@ function render(){
   const proxyInfo = state.proxy_ok ? ` | 出口：${esc(state.proxy_ip || "-")} ${state.proxy_latency_ms ? `(${state.proxy_latency_ms} ms)` : ""}` : "";
   $("status").innerHTML=`<span class="status-dot"></span>本地代理：http://127.0.0.1:8317 | 活动节点：${activeNodeInfo}${proxyInfo} | 状态：${esc(statusMessage)}`;
 
-  // Pagination calculation
-  const totalPages = Math.ceil(shown.length / pageSize) || 1;
-  if (currentPage > totalPages) currentPage = totalPages;
-  if (currentPage < 1) currentPage = 1;
-  
-  const startIndex = (currentPage - 1) * pageSize;
-  const endIndex = Math.min(startIndex + pageSize, shown.length);
-  currentPageNodes = shown.slice(startIndex, endIndex);
+  currentVisibleNodes = shown;
 
   // Render table rows
-  if (currentPageNodes.length === 0) {
-    $("rows").innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
+  if (currentVisibleNodes.length === 0) {
+    $("rows").innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
   } else {
-    $("rows").innerHTML=currentPageNodes.map(n=>{
+    $("rows").innerHTML=currentVisibleNodes.map(n=>{
       const isCurrentlyActive = activeNode && n.id === activeNode.id;
       const rowClass = isCurrentlyActive ? 'class="active-row"' : '';
       
@@ -2869,33 +2992,8 @@ function render(){
     }).join("");
   }
 
-  // Render pagination controls
-  $("page_start").textContent = shown.length > 0 ? startIndex + 1 : 0;
-  $("page_end").textContent = endIndex;
   $("filtered_count").textContent = shown.length;
-  $("current_page_val").textContent = currentPage;
-  $("total_pages_val").textContent = totalPages;
-  
-  $("btn_first_page").disabled = currentPage === 1;
-  $("btn_prev_page").disabled = currentPage === 1;
-  $("btn_next_page").disabled = currentPage === totalPages;
-  $("btn_last_page").disabled = currentPage === totalPages;
 }
-
-// Hook up page buttons events
-$("btn_first_page").onclick = () => { currentPage = 1; render(); };
-$("btn_prev_page").onclick = () => { if (currentPage > 1) { currentPage--; render(); } };
-$("btn_next_page").onclick = () => {
-  const shown = getFilteredNodes();
-  const totalPages = Math.ceil(shown.length / pageSize) || 1;
-  if (currentPage < totalPages) { currentPage++; render(); }
-};
-$("btn_last_page").onclick = () => {
-  const shown = getFilteredNodes();
-  const totalPages = Math.ceil(shown.length / pageSize) || 1;
-  currentPage = totalPages;
-  render();
-};
 
 async function testNode(btn, id, event){
   if (event) event.stopPropagation();
@@ -3008,9 +3106,9 @@ async function disconnectNode(){
 
 // Batch test button implementation
 $("btn_batch_test").onclick = async () => {
-  const pageNodes = currentPageNodes || [];
-  if (pageNodes.length === 0) {
-    alert("当前页面没有可供测试的备选节点");
+  const visibleNodes = currentVisibleNodes || [];
+  if (visibleNodes.length === 0) {
+    alert("当前列表没有可供测试的备选节点");
     return;
   }
   
@@ -3018,37 +3116,39 @@ $("btn_batch_test").onclick = async () => {
   btn.disabled = true;
   btn.innerHTML = `<svg style="animation: spin 1s linear infinite; width: 14px; height: 14px; display: inline-block; margin-right: 6px; vertical-align: middle;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" fill="none"></circle><path d="M4 12a8 8 0 018-8" stroke="currentColor" fill="none"></path></svg>测试中...`;
   
-  pageNodes.forEach(n => testingNodeIds.add(n.id));
+  visibleNodes.forEach(n => testingNodeIds.add(n.id));
   render();
   
-  const testPromises = pageNodes.map(async (n) => {
-    const id = n.id;
-    try {
-      const response = await fetch("./api/test_node", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id })
-      });
-      const result = await response.json();
-      if (result.ok && result.node) {
-        const idx = nodes.findIndex(item => item.id === id);
-        if (idx !== -1) {
-          nodes[idx] = result.node;
-        }
-      }
-    } catch (e) {
-    } finally {
-      testingNodeIds.delete(id);
-      render();
-    }
-  });
-  
   try {
-    await Promise.all(testPromises);
+    const chunkSize = 10;
+    for (let i = 0; i < visibleNodes.length; i += chunkSize) {
+      const chunk = visibleNodes.slice(i, i + chunkSize);
+      await Promise.all(chunk.map(async (n) => {
+        const id = n.id;
+        try {
+          const response = await fetch("./api/test_node", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id })
+          });
+          const result = await response.json();
+          if (result.ok && result.node) {
+            const idx = nodes.findIndex(item => item.id === id);
+            if (idx !== -1) {
+              nodes[idx] = result.node;
+            }
+          }
+        } catch (e) {
+        } finally {
+          testingNodeIds.delete(id);
+          render();
+        }
+      }));
+    }
   } catch (e) {
   } finally {
     btn.disabled = false;
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> 批量测试本页`;
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> 批量测试当前列表`;
   }
 };
 
@@ -3081,43 +3181,39 @@ async function loadCountryOptions(){
   } catch(e) {}
 }
 
-$("search").oninput=()=>{ currentPage = 1; render(); };
-$("country_filter").onchange=async()=>{
-  currentPage = 1;
-  const country = $("country_filter").value;
+$("search").oninput=()=>{ render(); };
+$("ip_type_filter").onchange=()=>{ render(); };
+$("country_filter").onchange=()=>{
   stopCountryRefreshPolling();
   render();
-  if (!country) return;
-  state.last_check_message = `Fetching nodes for ${country}...`;
-  render();
-  try {
-    await fetch("./api/refresh_country_nodes", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({country})
-    });
-    await load();
-    if (countNodesForCountry(country) === 0) {
-      startCountryRefreshPolling(country);
-    }
-  } catch(e) {}
 };
 
 $("refresh").onclick=async()=>{ 
+  const country = $("country_filter").value;
   $("refresh").disabled=true; 
-  $("refresh").textContent="正在后台更新..."; 
-  try{await fetch("./api/refresh_nodes",{method:"POST"}); await load();} 
+  $("refresh").textContent=country ? `正在后台更新 ${country}...` : "正在后台更新...";
+  try{
+    if (country) {
+      state.last_check_message = `Fetching nodes for ${country}...`;
+      render();
+      await fetch("./api/refresh_country_nodes", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({country})
+      });
+    } else {
+      await fetch("./api/refresh_nodes",{method:"POST"});
+    }
+    await load();
+    if (country && countNodesForCountry(country) === 0) {
+      startCountryRefreshPolling(country);
+    }
+  } 
   catch(e){}
   setTimeout(()=>{
     $("refresh").disabled=false; 
     $("refresh").textContent="更新节点";
   }, 3000);
-};
-$("check").onclick=async()=>{ 
-  $("check").disabled=true; 
-  $("check").textContent="检测中..."; 
-  try{await fetch("./api/check",{method:"POST"}); await load();} 
-  finally{$("check").disabled=false; $("check").textContent="立即检测补齐";}
 };
 // Admin dropdown toggle
 const adminBtn = $("admin_btn");
@@ -3660,12 +3756,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        if effective_path == "/api/check":
-            try:
-                self.send_json({"ok": True, "message": maintain_valid_nodes(force=True)})
-            except Exception as exc:
-                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-        elif effective_path == "/api/refresh_nodes":
+        if effective_path == "/api/refresh_nodes":
             try:
                 threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
                 self.send_json({"ok": True, "message": "已在后台启动节点更新流程"})
