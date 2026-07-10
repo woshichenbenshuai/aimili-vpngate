@@ -142,15 +142,10 @@ def generate_random_username():
         if uname[0].isalpha() and any(c.islower() for c in uname) and any(c.isupper() for c in uname) and any(c.isdigit() for c in uname):
             return uname
 
-def generate_random_suffix():
-    import random
-    import string
-    return "".join(random.choices(string.ascii_letters + string.digits, k=12))
-
 def load_ui_cfg():
     import json
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
-    cfg = {"host": "127.0.0.1", "port": 6379, "secret_path": "EJsW2EeBo9lY", "username": "", "password": ""}
+    cfg = {"host": "127.0.0.1", "port": 17002, "username": "", "password": ""}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -159,6 +154,7 @@ def load_ui_cfg():
                     cfg[k] = v
         except Exception:
             pass
+    cfg.pop("secret_path", None)
     return cfg
 
 def save_ui_cfg(cfg):
@@ -317,8 +313,7 @@ def format_line(label, value, target_width=26):
 
 def print_status():
     cfg = load_ui_cfg()
-    ui_port = cfg.get("port", 6379)
-    secret_path = cfg.get("secret_path", "EJsW2EeBo9lY")
+    ui_port = cfg.get("port", 17002)
     state = load_state()
     is_connecting = state.get("is_connecting", False)
     
@@ -354,7 +349,7 @@ def print_status():
     print(format_line("连接核心 (OpenVPN)", openvpn_status))
     
     login_ip = "127.0.0.1" if cfg.get("host") == "127.0.0.1" else get_public_ip()
-    print(format_line("网页登录地址", f"{yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}"))
+    print(format_line("网页登录地址", f"{yellow}http://{login_ip}:{ui_port}/{reset}"))
     print(format_line("网页管理账号", cfg.get("username", "admin")))
     curr_pwd = cfg.get("password", "")
     masked_pwd = curr_pwd if len(curr_pwd) <= 4 else curr_pwd[:3] + "********" + curr_pwd[-2:]
@@ -496,13 +491,12 @@ def configure_web():
     while True:
         print("\033[H\033[J", end="")
         print("=======================================================")
-        print("               网页绑定与地址后缀配置                  ")
+        print("                    网页绑定配置                       ")
         print("=======================================================")
         print(f"  [1] 切换绑定地址 (当前: {cfg.get('host', '0.0.0.0')})")
-        print(f"  [2] 随机重置安全后缀 (当前: {cfg.get('secret_path', '')})")
-        print("  [3] 返回主菜单")
+        print("  [2] 返回主菜单")
         print("=======================================================")
-        print("请直接输入数字键 [1-3] 快速执行：", end="", flush=True)
+        print("请直接输入数字键 [1-2] 快速执行：", end="", flush=True)
         
         key = getch()
         if key == '1':
@@ -519,17 +513,7 @@ def configure_web():
             print(f"绑定地址已更新为: {cfg['host']}")
             ask_restart()
             break
-        elif key == '2':
-            print("\033[H\033[J", end="")
-            new_path = generate_random_suffix()
-            cfg['secret_path'] = new_path
-            save_ui_cfg(cfg)
-            print("安全登录后缀已随机重置成功！")
-            print(f"您的全新安全登录后缀为: {new_path}")
-            print(f"新的访问路径为: http://{cfg['host']}:{cfg['port']}/{new_path}/")
-            ask_restart()
-            break
-        elif key == '3' or key == 'q' or key == '\x03':
+        elif key == '2' or key == 'q' or key == '\x03':
             break
 
 def configure_port():
@@ -538,7 +522,7 @@ def configure_port():
     print("=======================================================")
     print("                      管理端口配置                     ")
     print("=======================================================")
-    print(f"当前网页管理端口为: {cfg.get('port', 6379)}")
+    print(f"当前网页管理端口为: {cfg.get('port', 17002)}")
     try:
         val = input("请输入新的管理端口 (1-65535, 按回车取消): ").strip()
         if val:
@@ -649,8 +633,7 @@ def get_status_state():
     cfg = load_ui_cfg()
     state = load_state()
     return (
-        cfg.get("port", 6379),
-        cfg.get("secret_path", "EJsW2EeBo9lY"),
+        cfg.get("port", 17002),
         cfg.get("username", "admin"),
         cfg.get("password", ""),
         cfg.get("host", "0.0.0.0"),
@@ -778,13 +761,11 @@ AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
 mkdir -p "${INSTALL_DIR}/vpngate_data"
 
 if [ ! -f "$AUTH_FILE" ]; then
-    echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/安全后缀/登录账号密码）？${PLAIN}"
+    echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/登录账号密码）？${PLAIN}"
     read -p "是否自定义配置？[y/N]: " is_custom
     
     # Initialize defaults
-    UI_PORT=6379
-    # generate random secret suffix (12 chars alphanumeric)
-    SECRET_PATH=$(python3 -c "import random, string; print(''.join(random.choices(string.ascii_letters + string.digits, k=12)))")
+    UI_PORT=17002
     # generate random password
     UI_PASSWORD=$(python3 -c "
 import random, string
@@ -809,9 +790,9 @@ while True:
         # Step-by-step custom inputs
         # 1. Custom port
         while true; do
-            read -p "请输入自定义管理端口 [1-65535, 默认 6379]: " input_port
+            read -p "请输入自定义管理端口 [1-65535, 默认 17002]: " input_port
             if [ -z "$input_port" ]; then
-                UI_PORT=6379
+                UI_PORT=17002
                 break
             fi
             if [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
@@ -822,21 +803,7 @@ while True:
             fi
         done
         
-        # 2. Custom suffix
-        while true; do
-            read -p "请输入网页登录自定义安全后缀 [字母与数字组合, 默认随机]: " input_suffix
-            if [ -z "$input_suffix" ]; then
-                break
-            fi
-            if [[ "$input_suffix" =~ ^[A-Za-z0-9]+$ ]]; then
-                SECRET_PATH=$input_suffix
-                break
-            else
-                echo -e "${RED}输入错误: 后缀仅能由英文字母和数字组成！${PLAIN}"
-            fi
-        done
-        
-        # 3. Custom login username and password
+        # 2. Custom login username and password
         read -p "请输入登录账号 [默认 $UI_USERNAME]: " input_user
         if [ -n "$input_user" ]; then
             UI_USERNAME=$input_user
@@ -862,7 +829,6 @@ import json
 cfg = {
     'host': '127.0.0.1',
     'port': int('$UI_PORT'),
-    'secret_path': '$SECRET_PATH',
     'username': '$UI_USERNAME',
     'password': '$UI_PASSWORD'
 }
@@ -910,16 +876,14 @@ if [ -z "$ACTIVE_ID" ]; then
     echo -e "  -> ${YELLOW}[加载超时]${PLAIN} 首次节点获取或连接超时，将在后台继续尝试..."
 fi
 
-SECRET_PATH="EJsW2EeBo9lY"
 USERNAME="admin"
 PASSWORD="未配置"
-UI_PORT=6379
+UI_PORT=17002
 AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
 if [ -f "$AUTH_FILE" ]; then
-    SECRET_PATH=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('secret_path', 'EJsW2EeBo9lY'))" 2>/dev/null || echo "EJsW2EeBo9lY")
     USERNAME=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('username', 'admin'))" 2>/dev/null || echo "admin")
     PASSWORD=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('password', '未配置'))" 2>/dev/null || echo "未配置")
-    UI_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('port', 6379))" 2>/dev/null || echo "6379")
+    UI_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('port', 17002))" 2>/dev/null || echo "17002")
 fi
 
 # Get VPS public IP
@@ -930,7 +894,7 @@ echo -n "$PUBLIC_IP" > "${INSTALL_DIR}/vpngate_data/public_ip.txt"
 echo -e "\n${GREEN}==========================================================${PLAIN}"
 echo -e "${GREEN}             AimiliVPN 源码一键部署已完成！${PLAIN}"
 echo -e "${GREEN}==========================================================${PLAIN}"
-echo -e "  * 网页控制面板:  ${BLUE}http://${PUBLIC_IP}:${UI_PORT}/${SECRET_PATH}/${PLAIN}"
+echo -e "  * 网页控制面板:  ${BLUE}http://${PUBLIC_IP}:${UI_PORT}/${PLAIN}"
 echo -e "  * 网页管理账号:  ${YELLOW}${USERNAME}${PLAIN}"
 echo -e "  * 网页管理密码:  ${YELLOW}${PASSWORD}${PLAIN}"
 echo -e "  * HTTP/SOCKS5 代理端口:  ${BLUE}http://127.0.0.1:8317/${PLAIN}"

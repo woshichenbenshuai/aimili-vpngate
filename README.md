@@ -35,7 +35,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 * **`ml stop`**：停止 AimiliVPN 服务（并自动清理策略路由与 OpenVPN 进程）。
 * **`ml restart`**：重启服务。
 * **`ml logs`**：查看实时的 Systemd 服务运行日志。
-* **`ml web`**：切换网页绑定地址（127.0.0.1 仅本地，或 0.0.0.0 允许公网访问）与重置安全后缀。
+* **`ml web`**：切换网页绑定地址（127.0.0.1 仅本地，或 0.0.0.0 允许公网访问）。
 * **`ml port`**：修改网页管理控制台监听端口。
 * **`ml password`**：生成新的 12 位安全管理密码。
 * **`ml uninstall`**：完全卸载服务并清理相关环境。
@@ -114,10 +114,10 @@ sudo apt-get update
    * Outbound socket connections inside the local proxy server are strictly bound to `tun0` via `SO_BINDTODEVICE`.
    * If the VPN disconnects, proxy requests are instantly blocked with a `502 Bad Gateway` instead of falling back to the VPS physical IP address.
 4. 🖥️ **Modern Web UI Panel**:
-   * Sleek dark/light responsive console (default port `6379`).
+   * Sleek dark/light responsive console (default port `17002`).
    * Provides real-time geolocation, ISP, ASN, latency, and IP-type (residential/datacenter) detection.
    * Enables manual node selection, blacklist resets, proxy speed-testing, and logs query.
-   * Secured by a random secret path suffix (e.g., `/EJsW2EeBo9lY/`) and password authentication.
+   * Secured by password authentication.
 5. 🛠️ **CLI Utility (ml)**:
    * Command-line helper tool `ml` with a menu-driven interface.
    * Provides quick statuses, starts/stops the daemon, resets passwords, and changes bind hosts.
@@ -142,7 +142,7 @@ Once installed, use the global command `ml` to launch the interactive helper men
 * **`ml stop`**: Stop the gateway service (and clean routing tables).
 * **`ml restart`**: Restart the service.
 * **`ml logs`**: View real-time Systemd output logs.
-* **`ml web`**: Toggle Web UI accessibility (127.0.0.1 or 0.0.0.0) and reset suffix paths.
+* **`ml web`**: Toggle Web UI accessibility (127.0.0.1 or 0.0.0.0).
 * **`ml port`**: Update the Web Console port.
 * **`ml password`**: Regenerate a secure 12-character administration password.
 * **`ml uninstall`**: Completely remove the service and repository files from your VPS.

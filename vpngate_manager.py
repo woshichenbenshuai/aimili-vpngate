@@ -48,8 +48,10 @@ OPENVPN_AUTH_USER = os.environ.get("OPENVPN_AUTH_USER", "vpn")
 OPENVPN_AUTH_PASS = os.environ.get("OPENVPN_AUTH_PASS", "vpn")
 LOCAL_PROXY_HOST = os.environ.get("LOCAL_PROXY_HOST", "127.0.0.1")
 LOCAL_PROXY_PORT = int(os.environ.get("LOCAL_PROXY_PORT", "8317"))
-UI_HOST = os.environ.get("UI_HOST", "127.0.0.1")
-UI_PORT = int(os.environ.get("UI_PORT", "6379"))
+UI_HOST_ENV = os.environ.get("UI_HOST")
+UI_PORT_ENV = os.environ.get("UI_PORT")
+UI_HOST = UI_HOST_ENV or "127.0.0.1"
+UI_PORT = int(UI_PORT_ENV or "17002")
 INVALID_BACKOFF_SECONDS = int(os.environ.get("INVALID_BACKOFF_SECONDS", str(30 * 60)))
 BLACKLIST_TTL_SECONDS = int(os.environ.get("BLACKLIST_TTL_SECONDS", str(6 * 60 * 60)))
 MAX_NODE_SESSIONS = int(os.environ.get("MAX_NODE_SESSIONS", "30"))
@@ -171,19 +173,35 @@ def load_ui_config() -> dict[str, Any]:
         auth_file = DATA_DIR / "ui_auth.json"
         config = {
             "username": "",
-            "secret_path": "EJsW2EeBo9lY",
             "password": "",
             "host": UI_HOST,
-            "port": 6379
+            "port": UI_PORT
         }
         updated = False
         if auth_file.exists():
             try:
-                data = json.loads(auth_file.read_text(encoding="utf-8"))
+                data = json.loads(auth_file.read_text(encoding="utf-8-sig"))
                 for key, val in data.items():
                     config[key] = val
             except Exception:
                 pass
+
+        if "secret_path" in config:
+            config.pop("secret_path", None)
+            updated = True
+
+        if UI_HOST_ENV is not None and config.get("host") != UI_HOST:
+            config["host"] = UI_HOST
+            updated = True
+
+        if UI_PORT_ENV is not None:
+            try:
+                current_port = int(config.get("port", UI_PORT))
+            except Exception:
+                current_port = UI_PORT
+            if current_port != UI_PORT:
+                config["port"] = UI_PORT
+                updated = True
 
         if not config.get("username"):
             config["username"] = generate_random_username()
@@ -298,8 +316,7 @@ def get_state() -> dict[str, Any]:
     # Pre-populate settings inputs in UI
     ui_cfg = load_ui_config()
     state["username"] = ui_cfg.get("username", "")
-    state["port"] = ui_cfg.get("port", 6379)
-    state["secret_path"] = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
+    state["port"] = ui_cfg.get("port", UI_PORT)
     
     return state
 
@@ -2472,14 +2489,9 @@ INDEX_HTML = r"""<!doctype html>
           
           <div class="form-group" style="margin-bottom: 12px;">
             <label class="form-label" for="settings_port">网页端口</label>
-            <input type="number" id="settings_port" class="input-field" required min="1" max="65535" placeholder="6379">
+            <input type="number" id="settings_port" class="input-field" required min="1" max="65535" placeholder="17002">
           </div>
           
-          <div class="form-group" style="margin-bottom: 12px;">
-            <label class="form-label" for="settings_suffix">登录安全后缀 (仅字母数字)</label>
-            <input type="text" id="settings_suffix" class="input-field" required pattern="[A-Za-z0-9]+" placeholder="EJsW2EeBo9lY">
-          </div>
-
           <div class="form-group" style="margin-bottom: 12px;">
             <label class="form-label" for="settings_new_username">新管理账号 (留空则不修改)</label>
             <input type="text" id="settings_new_username" class="input-field" placeholder="留空则不修改">
@@ -3139,8 +3151,7 @@ function openSettingsModal() {
   $("settings_form").reset();
   
   if (state) {
-    $("settings_port").value = state.port || 6379;
-    $("settings_suffix").value = state.secret_path || "EJsW2EeBo9lY";
+    $("settings_port").value = state.port || 17002;
   }
   
   $("settings_modal").style.display = "flex";
@@ -3161,7 +3172,6 @@ async function saveSettings(e) {
   successDiv.style.display = "none";
   
   const port = parseInt($("settings_port").value);
-  const suffix = $("settings_suffix").value.trim();
   const newUsername = $("settings_new_username").value.trim();
   const newPassword = $("settings_new_password").value.trim();
   const currUsername = $("settings_curr_username").value.trim();
@@ -3169,12 +3179,6 @@ async function saveSettings(e) {
   
   if (isNaN(port) || port < 1 || port > 65535) {
     errorDivEl.textContent = "端口范围必须在 1 至 65535 之间";
-    errorDivEl.style.display = "block";
-    return;
-  }
-  
-  if (!/^[A-Za-z0-9]+$/.test(suffix)) {
-    errorDivEl.textContent = "登录安全后缀仅能由英文字母和数字组成";
     errorDivEl.style.display = "block";
     return;
   }
@@ -3188,7 +3192,6 @@ async function saveSettings(e) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         port: port,
-        secret_path: suffix,
         new_username: newUsername,
         new_password: newPassword,
         curr_username: currUsername,
@@ -3207,7 +3210,7 @@ async function saveSettings(e) {
       setTimeout(() => {
         const protocol = window.location.protocol;
         const host = window.location.hostname;
-        window.location.href = `${protocol}//${host}:${port}/${suffix}/`;
+        window.location.href = `${protocol}//${host}:${port}/`;
       }, 4000);
     } else {
       errorDivEl.textContent = data.error || "保存失败，请检查输入";
@@ -3402,30 +3405,6 @@ def active_node_pinger() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def get_secret_path(self) -> str:
-        auth_file = DATA_DIR / "ui_auth.json"
-        if not auth_file.exists():
-            try:
-                DATA_DIR.mkdir(exist_ok=True)
-                auth_file.write_text(json.dumps({"secret_path": "EJsW2EeBo9lY"}), encoding="utf-8")
-            except Exception:
-                pass
-            return "EJsW2EeBo9lY"
-        try:
-            creds = json.loads(auth_file.read_text(encoding="utf-8"))
-            if "secret_path" in creds:
-                return creds["secret_path"]
-            elif "password" in creds:
-                secret_path = creds["password"]
-                try:
-                    auth_file.write_text(json.dumps({"secret_path": secret_path}), encoding="utf-8")
-                except Exception:
-                    pass
-                return secret_path
-            return "EJsW2EeBo9lY"
-        except Exception:
-            return "EJsW2EeBo9lY"
-
     def is_authorized(self) -> bool:
         ui_cfg = load_ui_config()
         pwd = ui_cfg.get("password")
@@ -3445,20 +3424,7 @@ class Handler(BaseHTTPRequestHandler):
         return session_token_valid(cookies.get("session", ""))
 
     def validate_path(self) -> str:
-        secret_path = self.get_secret_path()
-        if not secret_path:
-            return self.path
-        if self.path == f"/{secret_path}":
-            self.send_response(HTTPStatus.FOUND)
-            self.send_header("Location", f"/{secret_path}/")
-            self.end_headers()
-            return ""
-        prefix = f"/{secret_path}/"
-        if self.path.startswith(prefix):
-            return "/" + self.path[len(prefix):]
-        self.send_response(HTTPStatus.NOT_FOUND)
-        self.end_headers()
-        return ""
+        return self.path
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}", flush=True)
@@ -3562,9 +3528,7 @@ class Handler(BaseHTTPRequestHandler):
                     token = create_session_token()
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
-                    secret_path = self.get_secret_path()
-                    cookie_path = f"/{secret_path}/" if secret_path else "/"
-                    self.send_header("Set-Cookie", f"session={token}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=2592000")
+                    self.send_header("Set-Cookie", f"session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
                     self.end_headers()
                     self.wfile.write(json.dumps({"ok": True}).encode("utf-8"))
                 else:
@@ -3584,11 +3548,9 @@ class Handler(BaseHTTPRequestHandler):
                             k, v = item.split("=", 1)
                             cookies[k.strip()] = v.strip()
                 revoke_session_token(cookies.get("session", ""))
-                secret_path = self.get_secret_path()
-                cookie_path = f"/{secret_path}/" if secret_path else "/"
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Set-Cookie", f"session=; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                self.send_header("Set-Cookie", f"session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": True}).encode("utf-8"))
             except Exception as exc:
@@ -3608,7 +3570,6 @@ class Handler(BaseHTTPRequestHandler):
                 curr_password = str(payload.get("curr_password") or "")
                 
                 new_port = payload.get("port")
-                new_suffix = str(payload.get("secret_path") or "").strip()
                 new_username = str(payload.get("new_username") or "").strip()
                 new_password = str(payload.get("new_password") or "").strip()
                 
@@ -3632,12 +3593,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "端口范围必须是 1 至 65535"}, HTTPStatus.BAD_REQUEST)
                     return
                 
-                if not new_suffix or not re.match(r"^[A-Za-z0-9]+$", new_suffix):
-                    self.send_json({"ok": False, "error": "安全后缀仅能由英文字母和数字组成"}, HTTPStatus.BAD_REQUEST)
-                    return
-                
                 ui_cfg["port"] = new_port_int
-                ui_cfg["secret_path"] = new_suffix
                 if new_username:
                     ui_cfg["username"] = new_username
                 if new_password:
