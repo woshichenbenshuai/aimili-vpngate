@@ -8,7 +8,10 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
+      # Web UI.
       - "17002:17002"
+      # Host-local proxy for sing-box; not exposed on public interfaces.
+      - "127.0.0.1:8317:8317"
     expose:
       - "8317"
     networks:
