@@ -591,16 +591,30 @@ def parse_publicvpnlist_entries(html: str) -> list[dict[str, Any]]:
     return entries
 
 def download_publicvpnlist_config(entry_id: str) -> str:
-    token_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, f"get_token.php?id={urllib.parse.quote(entry_id)}")
-    token_data = json.loads(fetch_text_url(token_url, timeout=20, accept="application/json,*/*"))
+    token_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, "get_token.php")
+    form_data = urllib.parse.urlencode({"id": str(entry_id)}).encode("utf-8")
+    request = urllib.request.Request(
+        token_url,
+        data=form_data,
+        headers={
+            "User-Agent": "Mozilla/5.0 vpngate-openvpn-manager/2.0",
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        token_data = json.loads(response.read().decode("utf-8", errors="replace"))
     download_url = token_data.get("url")
     token = token_data.get("token")
     if not download_url and token:
         download_url = f"download.php?token={urllib.parse.quote(str(token))}"
     if not download_url:
-        raise RuntimeError("PublicVPNList token response did not include a download URL.")
-    if str(download_url).startswith("/"):
-        download_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, str(download_url))
+        error = token_data.get("error") or token_data.get("message")
+        detail = f": {error}" if error else "."
+        raise RuntimeError(f"PublicVPNList token response did not include a download URL{detail}")
+    download_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, str(download_url))
     return fetch_text_url(str(download_url), timeout=30, accept="application/x-openvpn-profile,text/plain,*/*")
 
 def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict[str, Any]:
