@@ -105,8 +105,10 @@ sudo apt-get update
 ### ✨ Key Features
 
 1. ⚡ **Auto-Collection & Multi-Threaded Probing**:
-   * Periodically fetches candidate nodes from PublicVPNList and VPNGate.
-   * Pulls from PublicVPNList first, falls back to VPNGate, filters busy/shared public pools, then performs concurrent ping latency and handshake tests.
+   * Periodically fetches the full current PublicVPNList catalog and VPNGate nodes.
+   * PublicVPNList profiles are downloaded lazily when a node is tested or connected, while metadata is refreshed in bulk.
+   * By default the full PublicVPNList catalog is retained; optional candidate filters can be enabled with `PUBLICVPNLIST_FILTER_CANDIDATES=1`.
+   * Deny-listed IP prefixes remain blocked for every source; downloaded profiles are size-limited, hash-checked when available, and stored with restricted permissions.
 2. 🔒 **Anti-Lockout Routing (Policy Routing)**:
    * Directs traffic from the virtual adapter `tun0` to a customized routing table (Table 100) without altering the system's default gateway.
    * Keeps SSH sessions and server administration panels unaffected by the active VPN.

@@ -23,7 +23,12 @@ services:
       UI_HOST: 0.0.0.0
       UI_PORT: "17002"
       PUBLICVPNLIST_URL: https://publicvpnlist.com/
-      PUBLICVPNLIST_LIMIT: "40"
+      PUBLICVPNLIST_LIMIT: "0"
+      PUBLICVPNLIST_FILTER_CANDIDATES: "0"
+      PUBLICVPNLIST_MAX_CONFIG_BYTES: "262144"
+      MAX_NODE_LIST: "0"
+      MAX_TEST_NODES: "20"
+      MAX_TEST_WORKERS: "10"
       MAX_SCAN_ROWS: "1000"
       ACCEPTED_EXIT_IP_TYPES: residential,mobile
       MAX_NODE_SESSIONS: "30"

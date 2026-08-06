@@ -37,7 +37,18 @@ import proxy_server
 
 API_URL = "https://www.vpngate.net/api/iphone/"
 PUBLICVPNLIST_URL = os.environ.get("PUBLICVPNLIST_URL", "https://publicvpnlist.com/")
-PUBLICVPNLIST_LIMIT = int(os.environ.get("PUBLICVPNLIST_LIMIT", "40"))
+PUBLICVPNLIST_DATA_URL = os.environ.get(
+    "PUBLICVPNLIST_DATA_URL",
+    urllib.parse.urljoin(PUBLICVPNLIST_URL, "local/api/vpn-data.php"),
+)
+PUBLICVPNLIST_LIMIT = int(os.environ.get("PUBLICVPNLIST_LIMIT", "0"))
+PUBLICVPNLIST_FILTER_CANDIDATES = os.environ.get(
+    "PUBLICVPNLIST_FILTER_CANDIDATES", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+PUBLICVPNLIST_MAX_CONFIG_BYTES = int(os.environ.get("PUBLICVPNLIST_MAX_CONFIG_BYTES", "262144"))
+MAX_NODE_LIST = int(os.environ.get("MAX_NODE_LIST", "0"))
+MAX_TEST_NODES = int(os.environ.get("MAX_TEST_NODES", "20"))
+MAX_TEST_WORKERS = int(os.environ.get("MAX_TEST_WORKERS", "10"))
 FETCH_INTERVAL_SECONDS = int(os.environ.get("FETCH_INTERVAL_SECONDS", "960"))
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "960"))
 TARGET_VALID_NODES = int(os.environ.get("TARGET_VALID_NODES", "3"))
@@ -137,6 +148,14 @@ def write_json(path: Path, data: Any) -> None:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
+
+def write_private_config(path: Path, content: str) -> None:
+    path.parent.mkdir(exist_ok=True, parents=True)
+    path.write_text(content, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 def read_json(path: Path, default: Any) -> Any:
     with lock:
@@ -300,7 +319,13 @@ def get_state() -> dict[str, Any]:
     state.setdefault("api_url", API_URL)
     state.setdefault("target_valid_nodes", TARGET_VALID_NODES)
     state.setdefault("publicvpnlist_url", PUBLICVPNLIST_URL)
+    state.setdefault("publicvpnlist_data_url", PUBLICVPNLIST_DATA_URL)
     state.setdefault("publicvpnlist_limit", PUBLICVPNLIST_LIMIT)
+    state.setdefault("publicvpnlist_filter_candidates", PUBLICVPNLIST_FILTER_CANDIDATES)
+    state.setdefault("publicvpnlist_max_config_bytes", PUBLICVPNLIST_MAX_CONFIG_BYTES)
+    state.setdefault("max_node_list", MAX_NODE_LIST)
+    state.setdefault("max_test_nodes", MAX_TEST_NODES)
+    state.setdefault("max_test_workers", MAX_TEST_WORKERS)
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
     state.setdefault("local_proxy", f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}")
@@ -352,6 +377,21 @@ def fetch_text_url(url: str, timeout: int = 45, accept: str = "text/html,*/*") -
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
+
+def fetch_json_url(
+    url: str,
+    timeout: int = 45,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 vpngate-openvpn-manager/2.0",
+        "Accept": "application/json,*/*",
+    }
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, headers=request_headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", errors="replace"))
 
 def load_blacklist() -> dict[str, dict[str, Any]]:
     raw = read_json(BLACKLIST_FILE, {})
@@ -447,10 +487,16 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
         "probed_at": 0,
     }
 
-def clean_candidate_reject_reason(node: dict[str, Any]) -> str:
+def hard_candidate_reject_reason(node: dict[str, Any]) -> str:
     ip = str(node.get("ip") or node.get("remote_host") or "")
     if DENY_NODE_IP_PREFIXES and any(ip.startswith(prefix) for prefix in DENY_NODE_IP_PREFIXES):
         return "popular_prefix"
+    return ""
+
+def clean_candidate_reject_reason(node: dict[str, Any]) -> str:
+    hard_reason = hard_candidate_reject_reason(node)
+    if hard_reason:
+        return hard_reason
     sessions = parse_int(node.get("sessions"))
     if MAX_NODE_SESSIONS > 0 and sessions > MAX_NODE_SESSIONS:
         return "too_many_sessions"
@@ -590,7 +636,53 @@ def parse_publicvpnlist_entries(html: str) -> list[dict[str, Any]]:
         entries.append(item)
     return entries
 
-def download_publicvpnlist_config(entry_id: str) -> str:
+def publicvpnlist_same_origin(url: str) -> bool:
+    base = urllib.parse.urlsplit(PUBLICVPNLIST_URL)
+    candidate = urllib.parse.urlsplit(url)
+    if not base.scheme or not base.hostname or candidate.scheme != base.scheme or candidate.hostname != base.hostname:
+        return False
+    base_port = base.port or (443 if base.scheme == "https" else 80)
+    candidate_port = candidate.port or (443 if candidate.scheme == "https" else 80)
+    return candidate_port == base_port
+
+def validate_publicvpnlist_profile(profile_bytes: bytes, expected_hash: str = "") -> str:
+    if len(profile_bytes) > PUBLICVPNLIST_MAX_CONFIG_BYTES:
+        raise RuntimeError(
+            f"PublicVPNList profile is too large: {len(profile_bytes)} bytes"
+        )
+    actual_hash = hashlib.sha256(profile_bytes).hexdigest()
+    expected = str(expected_hash or "").strip().lower()
+    if expected and expected != actual_hash:
+        raise RuntimeError(
+            f"PublicVPNList profile hash mismatch: expected {expected}, got {actual_hash}"
+        )
+
+    profile_text = profile_bytes.decode("utf-8", errors="replace")
+    dangerous_directives = {
+        "auth-user-pass-verify",
+        "client-connect",
+        "down",
+        "learn-address",
+        "management",
+        "management-client",
+        "management-query-passwords",
+        "plugin",
+        "route-pre-down",
+        "route-up",
+        "script-security",
+        "tls-verify",
+        "up",
+    }
+    for raw_line in profile_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        directive = line.split(None, 1)[0].lower()
+        if directive in dangerous_directives:
+            raise RuntimeError(f"PublicVPNList profile contains blocked directive: {directive}")
+    return profile_text
+
+def download_publicvpnlist_config(entry_id: str, expected_hash: str = "") -> str:
     token_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, "get_token.php")
     form_data = urllib.parse.urlencode({"id": str(entry_id)}).encode("utf-8")
     request = urllib.request.Request(
@@ -615,27 +707,73 @@ def download_publicvpnlist_config(entry_id: str) -> str:
         detail = f": {error}" if error else "."
         raise RuntimeError(f"PublicVPNList token response did not include a download URL{detail}")
     download_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, str(download_url))
-    return fetch_text_url(str(download_url), timeout=30, accept="application/x-openvpn-profile,text/plain,*/*")
+    if not publicvpnlist_same_origin(str(download_url)):
+        raise RuntimeError(f"PublicVPNList returned an off-site profile URL: {download_url}")
+    profile_request = urllib.request.Request(
+        str(download_url),
+        headers={
+            "User-Agent": "Mozilla/5.0 vpngate-openvpn-manager/2.0",
+            "Accept": "application/x-openvpn-profile,text/plain,*/*",
+            "Cache-Control": "no-cache",
+        },
+    )
+    with urllib.request.urlopen(profile_request, timeout=30) as response:
+        final_url = str(response.geturl() or download_url)
+        if not publicvpnlist_same_origin(final_url):
+            raise RuntimeError(f"PublicVPNList profile redirected off-site: {final_url}")
+        profile_bytes = response.read(PUBLICVPNLIST_MAX_CONFIG_BYTES + 1)
+    return validate_publicvpnlist_profile(profile_bytes, expected_hash)
 
-def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict[str, Any]:
+def publicvpnlist_endpoint_key(entry: dict[str, Any]) -> str:
+    ip = str(entry.get("ip") or entry.get("host") or "").strip()
+    port = parse_int(entry.get("port") or entry.get("remote_port"))
+    proto = str(entry.get("proto") or entry.get("transport") or "").strip().lower()
+    return f"{ip}|{port}|{proto}"
+
+def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str = "") -> dict[str, Any]:
     ip = str(entry.get("ip") or entry.get("host") or "")
-    country_name = str(entry.get("country") or "")
-    country_code = str(entry.get("code") or "").upper().replace("-", "_")
+    country_name = str(entry.get("countryName") or entry.get("country") or "")
+    country_code = str(entry.get("code") or entry.get("country") or "").upper().replace("-", "_")
     country_display = country_display_name(country_name) or country_display_name(country_code) or country_name or country_code
-    remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, ip)
-    node_id = safe_name("_".join(["PVL", country_code or "XX", ip or remote_host, str(remote_port), proto]))
+    entry_port = parse_int(entry.get("port"))
+    entry_proto = str(entry.get("proto") or entry.get("transport") or "unknown").strip().lower()
+    remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, ip) if config_text else (ip, entry_port, entry_proto)
+    if not remote_host:
+        remote_host = ip
+    if not remote_port:
+        remote_port = entry_port
+    if not proto or proto == "unknown":
+        proto = entry_proto
+
+    speed_mbps = entry.get("checkerMeasuredThroughputMbps")
+    if speed_mbps is None:
+        speed_mbps = entry.get("speed")
+    if speed_mbps is None:
+        speed_mbps = entry.get("sourceReportedSpeedMbps") or 0
+    latency = entry.get("checkerMeasuredTunnelRttMs")
+    if latency is None:
+        latency = entry.get("latency")
+    if latency is None:
+        latency = entry.get("sourceReportedPingMs") or 0
+    pvl_id = str(entry.get("id") or "")
+    node_id = safe_name("_".join(["PVL", pvl_id or country_code or "XX", ip or remote_host, str(remote_port), proto]))
     config_path = CONFIG_DIR / f"{node_id}.ovpn"
+    upstream_source = str(entry.get("source") or entry.get("source_name") or "").strip()
+    detail_url = str(entry.get("detailUrl") or entry.get("server_page_url") or "")
+    if detail_url.startswith("/"):
+        detail_url = urllib.parse.urljoin(PUBLICVPNLIST_URL, detail_url)
     return {
         "id": node_id,
         "source": "publicvpnlist",
+        "upstream_source": upstream_source,
         "country": country_display,
         "country_short": country_code,
         "host_name": str(entry.get("host") or ""),
         "ip": ip,
-        "score": parse_int(entry.get("score")),
-        "ping": parse_int(entry.get("latency")),
-        "speed": int(float(str(entry.get("speed") or "0")) * 1000 * 1000 / 8),
-        "sessions": 0,
+        "score": parse_int(entry.get("technicalQualityScore") or entry.get("score")),
+        "ping": parse_int(latency),
+        "speed": int(float(str(speed_mbps or "0")) * 1000 * 1000 / 8),
+        "sessions": parse_int(entry.get("sessions")),
         "owner": "",
         "asn": "",
         "as_name": "",
@@ -645,6 +783,10 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict
         "latency_ms": 0,
         "config_file": str(config_path),
         "config_text": config_text,
+        "config_available": bool(entry.get("configAvailable", True)),
+        "config_hash": str(entry.get("configHash") or entry.get("config_sha256") or ""),
+        "publicvpnlist_numeric_id": parse_int(entry.get("id")),
+        "publicvpnlist_detail_url": detail_url,
         "proto": proto,
         "remote_host": remote_host,
         "remote_port": remote_port,
@@ -654,9 +796,72 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str) -> dict
         "probed_at": 0,
     }
 
-def fetch_publicvpnlist_candidates(
+def fetch_publicvpnlist_dataset() -> list[dict[str, Any]]:
+    separator = "&" if "?" in PUBLICVPNLIST_DATA_URL else "?"
+    url = f"{PUBLICVPNLIST_DATA_URL}{separator}v={int(time.time())}"
+    data = fetch_json_url(
+        url,
+        timeout=60,
+        headers={
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": PUBLICVPNLIST_URL,
+        },
+    )
+    if not isinstance(data, list):
+        raise RuntimeError("PublicVPNList full dataset response was not a JSON array")
+    return [entry for entry in data if isinstance(entry, dict)]
+
+def ensure_node_config(node: dict[str, Any]) -> str:
+    config_text = str(node.get("config_text") or "")
+    if config_text.strip():
+        return config_text
+
+    if str(node.get("source") or "").lower() != "publicvpnlist":
+        raise RuntimeError(f"Node {node.get('id', '')} has no OpenVPN configuration")
+
+    numeric_id = parse_int(node.get("publicvpnlist_numeric_id"))
+    if numeric_id <= 0:
+        raise RuntimeError(f"PublicVPNList node {node.get('id', '')} has no downloadable profile ID")
+
+    expected_port = parse_int(node.get("remote_port"))
+    expected_proto = str(node.get("proto") or "").strip().lower()
+    config_text = download_publicvpnlist_config(
+        str(numeric_id),
+        expected_hash=str(node.get("config_hash") or ""),
+    )
+    if not config_text.strip():
+        raise RuntimeError(f"PublicVPNList node {numeric_id} returned an empty profile")
+
+    remote_host, remote_port, proto = vpn_utils.parse_remote(
+        config_text,
+        str(node.get("ip") or node.get("remote_host") or ""),
+    )
+    node["config_text"] = config_text
+    node["remote_host"] = remote_host or node.get("ip") or ""
+    node["remote_port"] = remote_port or parse_int(node.get("remote_port"))
+    node["proto"] = proto if proto != "unknown" else node.get("proto") or "unknown"
+
+    if expected_port and remote_port and expected_port != remote_port:
+        raise RuntimeError(
+            f"PublicVPNList profile port mismatch: expected {expected_port}, got {remote_port}"
+        )
+    if expected_proto and proto != "unknown" and expected_proto != proto.lower():
+        raise RuntimeError(
+            f"PublicVPNList profile protocol mismatch: expected {expected_proto}, got {proto}"
+        )
+
+    config_file = str(node.get("config_file") or "").strip()
+    if not config_file:
+        raise RuntimeError(f"Node {node.get('id', '')} has no config path")
+    config_path = Path(config_file)
+    config_path.parent.mkdir(exist_ok=True, parents=True)
+    write_private_config(config_path, config_text)
+    return config_text
+
+def fetch_publicvpnlist_html_fallback(
     blacklist: dict[str, dict[str, Any]],
-    seen_ips: set[str],
+    seen_endpoints: set[str],
     country_filter: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     rejected: dict[str, int] = {}
@@ -687,14 +892,11 @@ def fetch_publicvpnlist_candidates(
             entries.append(entry)
             seen_entry_ids.add(entry_id)
 
-    if country_filter and not entries:
-        for entry in parse_publicvpnlist_entries(home_html):
-            if country_matches(country_filter, entry.get("country"), entry.get("code")):
-                entries.append(entry)
-
-    for entry in entries[:PUBLICVPNLIST_LIMIT]:
-        ip = str(entry.get("ip") or entry.get("host") or "")
-        if not ip or ip in seen_ips:
+    limit = PUBLICVPNLIST_LIMIT if PUBLICVPNLIST_LIMIT > 0 else 40
+    for entry in entries[:limit]:
+        node = None
+        endpoint_key = publicvpnlist_endpoint_key(entry)
+        if not endpoint_key or endpoint_key in seen_endpoints:
             continue
         try:
             config_text = download_publicvpnlist_config(str(entry["id"]))
@@ -706,30 +908,98 @@ def fetch_publicvpnlist_candidates(
         if is_blacklisted(node, blacklist):
             rejected["blacklisted"] = rejected.get("blacklisted", 0) + 1
             continue
-        reject_reason = clean_candidate_reject_reason(node)
-        if reject_reason:
-            rejected[reject_reason] = rejected.get(reject_reason, 0) + 1
+        hard_reason = hard_candidate_reject_reason(node)
+        if hard_reason:
+            rejected[hard_reason] = rejected.get(hard_reason, 0) + 1
             continue
+        if PUBLICVPNLIST_FILTER_CANDIDATES:
+            reject_reason = clean_candidate_reject_reason(node)
+            if reject_reason:
+                rejected[reject_reason] = rejected.get(reject_reason, 0) + 1
+                continue
         nodes.append(node)
-        seen_ips.add(ip)
+        seen_endpoints.add(endpoint_key)
+    return nodes, rejected
+
+def fetch_publicvpnlist_candidates(
+    blacklist: dict[str, dict[str, Any]],
+    seen_endpoints: set[str],
+    country_filter: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    rejected: dict[str, int] = {}
+    nodes: list[dict[str, Any]] = []
+    try:
+        entries = fetch_publicvpnlist_dataset()
+    except Exception as exc:
+        print(f"[publicvpnlist] full dataset failed, using HTML fallback: {exc}", flush=True)
+        fallback_nodes, fallback_rejected = fetch_publicvpnlist_html_fallback(
+            blacklist,
+            seen_endpoints,
+            country_filter,
+        )
+        fallback_rejected["full_dataset_fallback"] = 1
+        return fallback_nodes, fallback_rejected
+
+    for entry in entries:
+        if not entry.get("active", True):
+            rejected["inactive"] = rejected.get("inactive", 0) + 1
+            continue
+        if entry.get("configAvailable") is False:
+            rejected["no_config"] = rejected.get("no_config", 0) + 1
+            continue
+        if country_filter and not country_matches(
+            country_filter,
+            entry.get("countryName"),
+            entry.get("country"),
+        ):
+            continue
+        ip = str(entry.get("ip") or entry.get("host") or "")
+        endpoint_key = publicvpnlist_endpoint_key(entry)
+        if not ip or not endpoint_key or endpoint_key in seen_endpoints:
+            if endpoint_key and endpoint_key in seen_endpoints:
+                rejected["duplicate"] = rejected.get("duplicate", 0) + 1
+            continue
+        try:
+            node = publicvpnlist_entry_to_node(entry)
+        except Exception as exc:
+            rejected["invalid_record"] = rejected.get("invalid_record", 0) + 1
+            print(f"[publicvpnlist] invalid record {entry.get('id')}: {exc}", flush=True)
+            continue
+        if is_blacklisted(node, blacklist):
+            rejected["blacklisted"] = rejected.get("blacklisted", 0) + 1
+            continue
+        hard_reason = hard_candidate_reject_reason(node)
+        if hard_reason:
+            rejected[hard_reason] = rejected.get(hard_reason, 0) + 1
+            continue
+        if PUBLICVPNLIST_FILTER_CANDIDATES:
+            reject_reason = clean_candidate_reject_reason(node)
+            if reject_reason:
+                rejected[reject_reason] = rejected.get(reject_reason, 0) + 1
+                continue
+        nodes.append(node)
+        seen_endpoints.add(endpoint_key)
+        if PUBLICVPNLIST_LIMIT > 0 and len(nodes) >= PUBLICVPNLIST_LIMIT:
+            break
     return nodes, rejected
 
 def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
     blacklist = load_blacklist()
     candidates: list[dict[str, Any]] = []
-    seen_ips = set()
+    seen_endpoints: set[str] = set()
     rejected: dict[str, int] = {}
     has_cache = len(cached_nodes()) > 0
     max_attempts = 1 if has_cache else 2
+    attempts_used = 0
     
     log_to_json("INFO", "Main", "Fetching public VPN node sources...")
     log_to_json("INFO", "Main", "Fetching PublicVPNList candidates...")
     try:
-        pvl_nodes, pvl_rejected = fetch_publicvpnlist_candidates(blacklist, seen_ips, country_filter)
+        pvl_nodes, pvl_rejected = fetch_publicvpnlist_candidates(blacklist, seen_endpoints, country_filter)
         candidates.extend(pvl_nodes)
         for key, value in pvl_rejected.items():
             rejected[f"publicvpnlist_{key}"] = rejected.get(f"publicvpnlist_{key}", 0) + value
-        log_to_json("INFO", "Main", f"PublicVPNList returned {len(pvl_nodes)} clean candidates.")
+        log_to_json("INFO", "Main", f"PublicVPNList returned {len(pvl_nodes)} candidates.")
     except Exception as exc:
         rejected["publicvpnlist_error"] = rejected.get("publicvpnlist_error", 0) + 1
         print(f"[publicvpnlist] source failed: {exc}", flush=True)
@@ -737,6 +1007,7 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
 
     log_to_json("INFO", "Main", "Fetching VPNGate candidates...")
     for i in range(max_attempts):
+        attempts_used = i + 1
         if i > 0:
             time.sleep(1.5)
         try:
@@ -746,13 +1017,16 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
                 if country_filter and not country_matches(country_filter, row.get("CountryLong"), row.get("CountryShort")):
                     continue
                 ip = row.get("IP", "")
-                if not ip or ip in seen_ips:
+                if not ip:
                     continue
                 encoded = row.get("OpenVPN_ConfigData_Base64", "")
                 if not encoded:
                     continue
                 config_text = decode_config(encoded)
                 node = row_to_node(row, config_text)
+                endpoint_key = publicvpnlist_endpoint_key(node)
+                if not endpoint_key or endpoint_key in seen_endpoints:
+                    continue
                 if is_blacklisted(node, blacklist):
                     rejected["blacklisted"] = rejected.get("blacklisted", 0) + 1
                     continue
@@ -761,23 +1035,27 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
                     rejected[reject_reason] = rejected.get(reject_reason, 0) + 1
                     continue
                 candidates.append(node)
-                seen_ips.add(ip)
+                seen_endpoints.add(endpoint_key)
+            if candidates:
+                break
         except Exception as e:
             print(f"[fetch_candidates] Fetch {i+1} failed: {e}", flush=True)
             log_to_json("WARNING", "Main", f"第 {i+1} 次拉取 API 节点失败: {e}")
             if i == max_attempts - 1 and not candidates:
                 log_to_json("ERROR", "Main", f"获取官方 API 节点失败: {e}")
                 raise
+            if candidates:
+                break
                 
     candidates.sort(key=clean_node_sort_key)
     reject_summary = ", ".join(f"{k}={v}" for k, v in sorted(rejected.items())) or "none"
     set_state(
         last_fetch_at=time.time(),
         last_fetch_status="ok",
-        last_fetch_message=f"Fetched {len(candidates)} clean candidates across {max_attempts} attempt(s). Rejected: {reject_summary}.",
+        last_fetch_message=f"Fetched {len(candidates)} candidates across {attempts_used} attempt(s). Rejected: {reject_summary}.",
         blacklisted_nodes=len(blacklist),
     )
-    log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")
+    log_to_json("INFO", "Main", f"成功获取节点，共 {len(candidates)} 个候选节点")
     return candidates
 
 def cached_nodes() -> list[dict[str, Any]]:
@@ -1063,35 +1341,44 @@ def release_test_index(idx: int) -> None:
 def test_node_by_id(node_id: str) -> dict[str, Any]:
     with lock:
         nodes = read_json(NODES_FILE, [])
-        node = next((item for item in nodes if item.get("id") == node_id), None)
-        if not node:
+        stored_node = next((item for item in nodes if item.get("id") == node_id), None)
+        if not stored_node:
             raise ValueError(f"Node not found: {node_id}")
-        config_file = str(node["config_file"])
-        config_text = node.get("config_text") or ""
-        h = str(node.get("remote_host") or node.get("ip"))
-        p = parse_int(node.get("remote_port"))
-        fallback_ping = parse_int(node.get("ping"))
+        node = dict(stored_node)
+
+    ensure_node_config(node)
+    config_file = str(node["config_file"])
+    config_text = node.get("config_text") or ""
+    h = str(node.get("remote_host") or node.get("ip"))
+    p = parse_int(node.get("remote_port"))
+    fallback_ping = parse_int(node.get("ping"))
 
     temp_path = Path(config_file)
     try:
         CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-        temp_path.write_text(config_text, encoding="utf-8")
+        write_private_config(temp_path, config_text)
     except Exception as e:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
         raise RuntimeError(f"Failed to write temp config file: {e}")
 
     latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
     
     idx = get_free_test_index()
     try:
-        ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}")
+        try:
+            ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}")
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
     finally:
         release_test_index(idx)
-    
-    try:
-        if temp_path.exists():
-            temp_path.unlink()
-    except Exception:
-        pass
 
     temp_node = {
         "id": node_id,
@@ -1138,10 +1425,14 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
     with lock:
         nodes = read_json(NODES_FILE, [])
         to_test = [n for n in nodes if n.get("id") in node_ids]
+        if MAX_TEST_NODES > 0:
+            to_test = to_test[:MAX_TEST_NODES]
         
     def test_worker(args: tuple[int, dict[str, Any]]) -> dict[str, Any]:
         idx, n_info = args
+        n_info = dict(n_info)
         node_id = n_info["id"]
+        ensure_node_config(n_info)
         config_file = n_info["config_file"]
         config_text = n_info.get("config_text") or ""
         h = str(n_info.get("remote_host") or n_info.get("ip"))
@@ -1151,19 +1442,25 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         temp_path = Path(config_file)
         try:
             CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-            temp_path.write_text(config_text, encoding="utf-8")
-        except Exception:
-            pass
+            write_private_config(temp_path, config_text)
+        except Exception as e:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            raise RuntimeError(f"Failed to write temp config file: {e}")
             
         latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
         dev_name = f"tun{idx + 1}"
-        ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
-        
         try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except Exception:
-            pass
+            ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
             
         temp_node = {
             "id": node_id,
@@ -1197,7 +1494,8 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         return temp_node
 
     updated_nodes_map = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(to_test))) as executor:
+    worker_count = min(len(to_test), max(1, MAX_TEST_WORKERS))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count or 1) as executor:
         futures = {executor.submit(test_worker, (idx, n)): n["id"] for idx, n in enumerate(to_test)}
         for future in concurrent.futures.as_completed(futures):
             nid = futures[future]
@@ -1293,10 +1591,14 @@ def connect_node(node_id: str) -> str:
     try:
         log_to_json("INFO", "VPN", f"开始连接节点: {node_id}")
         nodes = read_json(NODES_FILE, [])
-        node = next((item for item in nodes if item.get("id") == node_id), None)
-        if not node:
+        stored_node = next((item for item in nodes if item.get("id") == node_id), None)
+        if not stored_node:
             raise ValueError(f"Node not found: {node_id}")
+        node = dict(stored_node)
         
+        set_state(active_node_latency="获取配置", last_check_message="正在准备并校验 OpenVPN 节点配置...")
+        ensure_node_config(node)
+
         set_state(active_node_latency="清理连接", last_check_message="正在关闭与清理旧的 VPN 连接及网卡...")
         stop_active_openvpn()
 
@@ -1304,7 +1606,7 @@ def connect_node(node_id: str) -> str:
         config_path = Path(node["config_file"])
         try:
             CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-            config_path.write_text(node.get("config_text") or "", encoding="utf-8")
+            write_private_config(config_path, node.get("config_text") or "")
         except Exception as e:
             raise RuntimeError(f"Failed to write configuration: {e}")
 
@@ -1372,7 +1674,7 @@ def connect_node(node_id: str) -> str:
             for item in nodes:
                 item["active"] = False
                 if item.get("id") == node_id:
-                    item.update(node)
+                    item.update({key: value for key, value in node.items() if key != "config_text"})
             write_json(NODES_FILE, nodes)
             set_state(
                 proxy_ok=False,
@@ -1394,6 +1696,36 @@ def connect_node(node_id: str) -> str:
     finally:
         with lock:
             is_connecting = False
+
+def select_nodes_for_probe(nodes: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    pool = [node for node in nodes if not node.get("active")]
+    if limit <= 0 or len(pool) <= limit:
+        return pool[:limit] if limit > 0 else pool
+
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for node in pool:
+        source = str(node.get("source") or "other").lower()
+        buckets.setdefault(source, []).append(node)
+
+    source_order = [source for source in ("publicvpnlist", "vpngate") if source in buckets]
+    source_order.extend(source for source in buckets if source not in source_order)
+    selected: list[dict[str, Any]] = []
+    positions = {source: 0 for source in source_order}
+    while len(selected) < limit:
+        added = False
+        for source in source_order:
+            position = positions[source]
+            bucket = buckets[source]
+            if position >= len(bucket):
+                continue
+            selected.append(bucket[position])
+            positions[source] = position + 1
+            added = True
+            if len(selected) >= limit:
+                break
+        if not added:
+            break
+    return selected
 
 def maintain_valid_nodes(force: bool = False, country_filter: str | None = None) -> str:
     global active_openvpn_process, active_openvpn_node_id
@@ -1444,14 +1776,14 @@ def maintain_valid_nodes(force: bool = False, country_filter: str | None = None)
                 merged.append(cand)
                 seen_ids.add(cand["id"])
                 
-        if len(merged) > 1000:
-            merged = merged[:1000]
+        if MAX_NODE_LIST > 0 and len(merged) > MAX_NODE_LIST:
+            merged = merged[:MAX_NODE_LIST]
             
         for n in merged:
             config_path = Path(n["config_file"])
-            if not config_path.exists():
+            if n.get("config_text") and not config_path.exists():
                 try:
-                    config_path.write_text(n["config_text"], encoding="utf-8")
+                    write_private_config(config_path, n["config_text"])
                 except Exception:
                     pass
                     
@@ -1460,7 +1792,7 @@ def maintain_valid_nodes(force: bool = False, country_filter: str | None = None)
     # Test the first 10 non-active nodes from the new list
     with lock:
         current_nodes = read_json(NODES_FILE, [])
-        to_test = [n for n in current_nodes if not n.get("active")][:10]
+        to_test = select_nodes_for_probe(current_nodes, 10)
         to_test_ids = [n["id"] for n in to_test]
         
     print(f"[维护线程] 正在检测新获取列表的前 10 个节点: {to_test_ids}", flush=True)
@@ -2571,6 +2903,12 @@ const translateSource = s => {
   return s || "VPNGate";
 };
 
+const displaySource = n => {
+  const source = translateSource(n && n.source);
+  const upstream = String(n && n.upstream_source || "").trim();
+  return source === "PublicVPNList" && upstream ? `${source} / ${upstream}` : source;
+};
+
 const translateCountry = c => {
   const dict = {
     "Japan": "日本",
@@ -2705,7 +3043,7 @@ function getFilteredNodes() {
     }
     const searchStr = [
       n.country, n.country_short, n.ip, n.remote_host, n.proto,
-      translateSource(n.source), translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
+      displaySource(n), translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
     ].join(" ").toLowerCase();
     return searchStr.includes(q);
   });
@@ -2804,7 +3142,7 @@ function render(){
               <span style="margin-left: 12px;">延时: <strong>${latencyText}</strong></span>
               <span style="margin-left: 12px;">运营主体: <strong>${esc(activeNode.owner || activeNode.as_name || "-")}</strong></span>
               <span style="margin-left: 12px;">IP 类型: <strong>${esc(translateIpType(activeNode.ip_type))}</strong></span>
-              <span style="margin-left: 12px;">来源: <strong>${esc(translateSource(activeNode.source))}</strong></span>
+              <span style="margin-left: 12px;">来源: <strong>${esc(displaySource(activeNode))}</strong></span>
             </div>
           </div>
         </div>
@@ -2878,7 +3216,7 @@ function render(){
       return `<tr ${rowClass}>
         <td><span class="badge ${badgeClass}">${badgeText}</span></td>
         <td>${latencyText}</td>
-        <td><span class="badge not_checked">${esc(translateSource(n.source))}</span></td>
+        <td><span class="badge not_checked">${esc(displaySource(n))}</span></td>
         <td class="mono">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
         <td>${esc(displayLocation)}</td>
         <td class="mono" style="font-size:12px; color:var(--text-secondary);">${esc(n.asn||"-")}</td>
@@ -3755,7 +4093,13 @@ def main() -> None:
         {
             "api_url": API_URL,
             "publicvpnlist_url": PUBLICVPNLIST_URL,
+            "publicvpnlist_data_url": PUBLICVPNLIST_DATA_URL,
             "publicvpnlist_limit": PUBLICVPNLIST_LIMIT,
+            "publicvpnlist_filter_candidates": PUBLICVPNLIST_FILTER_CANDIDATES,
+            "publicvpnlist_max_config_bytes": PUBLICVPNLIST_MAX_CONFIG_BYTES,
+            "max_node_list": MAX_NODE_LIST,
+            "max_test_nodes": MAX_TEST_NODES,
+            "max_test_workers": MAX_TEST_WORKERS,
             "target_valid_nodes": TARGET_VALID_NODES,
             "fetch_interval_seconds": FETCH_INTERVAL_SECONDS,
             "check_interval_seconds": CHECK_INTERVAL_SECONDS,
