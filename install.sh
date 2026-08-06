@@ -164,6 +164,10 @@ def save_ui_cfg(cfg):
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return True
     except Exception:
         return False
@@ -834,6 +838,8 @@ cfg = {
 }
 with open('$AUTH_FILE', 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
+import os
+os.chmod('$AUTH_FILE', 0o600)
 "
 fi
 

@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parent
-DATA_DIR = ROOT_DIR / "vpngate_data"
+DATA_DIR = (
+    Path(os.environ["VPNGATE_DATA_DIR"]).resolve()
+    if os.environ.get("VPNGATE_DATA_DIR")
+    else ROOT_DIR / "vpngate_data"
+)
 IP_CACHE_FILE = DATA_DIR / "ip_cache.json"
 
 ip_cache_lock = threading.RLock()
@@ -316,8 +320,14 @@ def load_ip_cache() -> dict[str, dict[str, Any]]:
 def save_ip_cache(cache: dict[str, dict[str, Any]]) -> None:
     with ip_cache_lock:
         try:
-            DATA_DIR.mkdir(exist_ok=True)
-            IP_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            DATA_DIR.mkdir(exist_ok=True, parents=True)
+            tmp_path = IP_CACHE_FILE.with_suffix(IP_CACHE_FILE.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(IP_CACHE_FILE)
+            try:
+                IP_CACHE_FILE.chmod(0o600)
+            except OSError:
+                pass
         except Exception:
             pass
 

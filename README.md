@@ -90,6 +90,12 @@ sudo apt-get update
     (国内直连流量)                                               (解锁流媒体、锁区网站)
 ```
 
+### 🧪 节点持续化筛选
+
+项目会保留 PublicVPNList 的上游来源标识（如 `AutoOVPN`、`VPNGate`、`IPSpeed`），按来源轮询探测节点，避免单一来源占满测试名额。节点会持久化记录出口 IP 类型、ASN/ISP、纯度评分、成功次数、失败次数和连续失败次数。
+
+默认只有被识别为住宅或移动网络、纯度评分达到 `MIN_PURITY_SCORE=70` 且未命中云厂商/机房特征的出口，才会进入自动切换池。调度器优先检测新节点，失败节点按退避时间重试，成功节点默认每 `PROBE_RECHECK_INTERVAL_SECONDS=21600` 秒复检。OpenVPN 配置独立保存在 `vpngate_data/configs/`，节点列表只保存元数据和质量历史，避免 `nodes.json` 随节点规模膨胀。
+
 ---
 
 ## English
@@ -106,9 +112,11 @@ sudo apt-get update
 
 1. ⚡ **Auto-Collection & Multi-Threaded Probing**:
    * Periodically fetches the full current PublicVPNList catalog and VPNGate nodes.
+   * Preserves upstream source labels and rotates probes across sources such as AutoOVPN, VPNGate, and IPSpeed.
    * PublicVPNList profiles are downloaded lazily when a node is tested or connected, while metadata is refreshed in bulk.
    * By default the full PublicVPNList catalog is retained; optional candidate filters can be enabled with `PUBLICVPNLIST_FILTER_CANDIDATES=1`.
    * Deny-listed IP prefixes remain blocked for every source; downloaded profiles are size-limited, hash-checked when available, and stored with restricted permissions.
+   * Promotes only residential/mobile exits that pass the configurable purity score and provider-quality policy.
 2. 🔒 **Anti-Lockout Routing (Policy Routing)**:
    * Directs traffic from the virtual adapter `tun0` to a customized routing table (Table 100) without altering the system's default gateway.
    * Keeps SSH sessions and server administration panels unaffected by the active VPN.

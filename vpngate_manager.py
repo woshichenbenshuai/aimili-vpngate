@@ -49,8 +49,14 @@ PUBLICVPNLIST_MAX_CONFIG_BYTES = int(os.environ.get("PUBLICVPNLIST_MAX_CONFIG_BY
 MAX_NODE_LIST = int(os.environ.get("MAX_NODE_LIST", "0"))
 MAX_TEST_NODES = int(os.environ.get("MAX_TEST_NODES", "20"))
 MAX_TEST_WORKERS = int(os.environ.get("MAX_TEST_WORKERS", "10"))
+MAINTENANCE_PROBE_NODES = int(
+    os.environ.get("MAINTENANCE_PROBE_NODES", str(MAX_TEST_NODES))
+)
 FETCH_INTERVAL_SECONDS = int(os.environ.get("FETCH_INTERVAL_SECONDS", "960"))
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "960"))
+PROBE_RECHECK_INTERVAL_SECONDS = int(
+    os.environ.get("PROBE_RECHECK_INTERVAL_SECONDS", str(6 * 60 * 60))
+)
 TARGET_VALID_NODES = int(os.environ.get("TARGET_VALID_NODES", "3"))
 MAX_SCAN_ROWS = int(os.environ.get("MAX_SCAN_ROWS", "1000"))
 OPENVPN_TEST_TIMEOUT_SECONDS = int(os.environ.get("OPENVPN_TEST_TIMEOUT_SECONDS", "35"))
@@ -78,6 +84,23 @@ ACCEPTED_EXIT_IP_TYPES = {
     for item in os.environ.get("ACCEPTED_EXIT_IP_TYPES", "residential,mobile").split(",")
     if item.strip()
 }
+MIN_PURITY_SCORE = int(os.environ.get("MIN_PURITY_SCORE", "70"))
+SOURCE_PROBE_ORDER = tuple(
+    item.strip().casefold()
+    for item in os.environ.get(
+        "SOURCE_PROBE_ORDER",
+        "AutoOVPN,VPNGate,IPSpeed,RiseupVPN,CoopVPN,CynegeirusOVPN,ZoultOVPN,publicvpnlist",
+    ).split(",")
+    if item.strip()
+)
+DATACENTER_PROVIDER_KEYWORDS = tuple(
+    item.strip().casefold()
+    for item in os.environ.get(
+        "DATACENTER_PROVIDER_KEYWORDS",
+        "amazon,aws,google cloud,microsoft azure,azure,digitalocean,vultr,linode,hetzner,ovh,contabo,leaseweb,oracle cloud,alibaba,aliyun,tencent cloud,racknerd,choopa,colo,datacenter,data center,hosting,vps,server,cloud",
+    ).split(",")
+    if item.strip()
+)
 
 PUBLICVPNLIST_COUNTRY_SLUGS = {
     "Korea Republic of": "south-korea",
@@ -126,6 +149,7 @@ AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 
 lock = threading.RLock()
+maintenance_lock = threading.Lock()
 active_sessions: dict[str, float] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
@@ -136,6 +160,13 @@ last_active_latency = 0
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     CONFIG_DIR.mkdir(exist_ok=True)
+    stale_before = time.time() - 2 * 60 * 60
+    for probe_path in CONFIG_DIR.glob(".probe_*.ovpn"):
+        try:
+            if probe_path.stat().st_mtime < stale_before:
+                probe_path.unlink()
+        except OSError:
+            pass
     if not AUTH_FILE.exists():
         AUTH_FILE.write_text(f"{OPENVPN_AUTH_USER}\n{OPENVPN_AUTH_PASS}\n", encoding="utf-8")
         try:
@@ -145,9 +176,14 @@ def ensure_dirs() -> None:
 
 def write_json(path: Path, data: Any) -> None:
     with lock:
+        path.parent.mkdir(exist_ok=True, parents=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
 def write_private_config(path: Path, content: str) -> None:
     path.parent.mkdir(exist_ok=True, parents=True)
@@ -234,7 +270,13 @@ def load_ui_config() -> dict[str, Any]:
             try:
                 DATA_DIR.mkdir(exist_ok=True, parents=True)
                 auth_file.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+                auth_file.chmod(0o600)
             except Exception:
+                pass
+        else:
+            try:
+                auth_file.chmod(0o600)
+            except OSError:
                 pass
                 
         return config
@@ -326,10 +368,14 @@ def get_state() -> dict[str, Any]:
     state.setdefault("max_node_list", MAX_NODE_LIST)
     state.setdefault("max_test_nodes", MAX_TEST_NODES)
     state.setdefault("max_test_workers", MAX_TEST_WORKERS)
+    state.setdefault("maintenance_probe_nodes", MAINTENANCE_PROBE_NODES)
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
+    state.setdefault("probe_recheck_interval_seconds", PROBE_RECHECK_INTERVAL_SECONDS)
     state.setdefault("local_proxy", f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}")
     state.setdefault("accepted_exit_ip_types", sorted(ACCEPTED_EXIT_IP_TYPES))
+    state.setdefault("min_purity_score", MIN_PURITY_SCORE)
+    state.setdefault("source_probe_order", list(SOURCE_PROBE_ORDER))
     state.setdefault("max_node_sessions", MAX_NODE_SESSIONS)
     state.setdefault("max_node_ping", MAX_NODE_PING)
     state.setdefault("min_node_speed", MIN_NODE_SPEED)
@@ -342,7 +388,16 @@ def get_state() -> dict[str, Any]:
     ui_cfg = load_ui_config()
     state["username"] = ui_cfg.get("username", "")
     state["port"] = ui_cfg.get("port", UI_PORT)
-    
+    nodes = cached_nodes()
+    state["source_stats"] = source_stats(nodes)
+    state["available_nodes"] = sum(
+        1 for node in nodes if node.get("probe_status") == "available"
+    )
+    state["high_purity_nodes"] = sum(
+        1 for node in nodes if node_quality_allowed(node)
+    )
+    state["valid_nodes"] = state["high_purity_nodes"]
+
     return state
 
 def safe_name(value: str) -> str:
@@ -433,6 +488,123 @@ def exit_type_allowed(ip_type: str | None) -> bool:
     normalized = (ip_type or "normal").strip().lower() or "normal"
     return normalized in ACCEPTED_EXIT_IP_TYPES
 
+def node_source_name(node: dict[str, Any]) -> str:
+    source = node.get("upstream_source") or node.get("source") or "other"
+    return str(source).strip() or "other"
+
+def node_endpoint_key(node: dict[str, Any]) -> str:
+    host = str(node.get("ip") or node.get("remote_host") or node.get("host") or "").strip()
+    port = parse_int(node.get("remote_port") or node.get("port"))
+    proto = str(node.get("proto") or node.get("transport") or "").strip().lower()
+    return f"{host}|{port}|{proto}" if host else ""
+
+def apply_purity_score(info: dict[str, Any]) -> dict[str, Any]:
+    ip_type = str(info.get("ip_type") or "").strip().lower()
+    quality = str(info.get("quality") or "").strip().lower()
+    provider_text = " ".join(
+        str(info.get(key) or "")
+        for key in ("owner", "asn", "as_name")
+    ).casefold()
+    reasons: list[str] = []
+
+    if ip_type == "residential":
+        score = 88
+    elif ip_type == "mobile":
+        score = 82
+    elif ip_type == "proxy" or quality == "proxy":
+        score = 5
+        reasons.append("proxy_detected")
+    elif ip_type == "hosting" or quality == "datacenter":
+        score = 0
+        reasons.append("hosting_detected")
+    else:
+        score = 0
+        reasons.append("network_type_unknown")
+
+    matched_keywords = [
+        keyword
+        for keyword in DATACENTER_PROVIDER_KEYWORDS
+        if keyword in provider_text
+    ]
+    if matched_keywords:
+        score = min(score, 15)
+        reasons.append("provider:" + "+".join(matched_keywords[:3]))
+
+    if not str(info.get("owner") or "").strip() and not str(info.get("as_name") or "").strip():
+        score = min(score, 40)
+        reasons.append("network_owner_unknown")
+
+    if not exit_type_allowed(ip_type):
+        reasons.append("exit_type_not_allowed")
+
+    score = max(0, min(100, int(score)))
+    if not ip_type or ip_type == "normal":
+        status = "unknown"
+    elif score >= MIN_PURITY_SCORE:
+        status = "high"
+    elif score >= 45:
+        status = "medium"
+    else:
+        status = "low"
+
+    info["purity_score"] = score
+    info["purity_status"] = status
+    info["purity_reasons"] = reasons
+    return info
+
+def node_quality_allowed(node: dict[str, Any]) -> bool:
+    return (
+        exit_type_allowed(node.get("ip_type"))
+        and str(node.get("purity_status") or "") == "high"
+        and parse_int(node.get("purity_score")) >= MIN_PURITY_SCORE
+    )
+
+def finalize_probe_result(
+    base: dict[str, Any],
+    ok: bool,
+    message: str,
+    latency_ms: int,
+    enrichment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = time.time()
+    result: dict[str, Any] = {
+        "latency_ms": latency_ms,
+        "probe_message": message,
+        "probed_at": now,
+        "last_probe_at": now,
+    }
+    if enrichment is not None:
+        for key in ("owner", "asn", "as_name", "location", "ip_type", "quality"):
+            if key in enrichment:
+                result[key] = enrichment.get(key, "")
+        apply_purity_score(result)
+        if ok and not node_quality_allowed(result):
+            ok = False
+            reasons = ", ".join(result.get("purity_reasons") or []) or "quality_policy"
+            result["probe_message"] = f"Rejected by IP quality policy: {reasons}"
+    else:
+        for key in (
+            "owner", "asn", "as_name", "location", "ip_type", "quality",
+            "purity_score", "purity_status", "purity_reasons",
+        ):
+            if key in base:
+                result[key] = base.get(key)
+
+    result["probe_status"] = "available" if ok else "unavailable"
+    successes = parse_int(base.get("probe_successes"))
+    failures = parse_int(base.get("probe_failures"))
+    if ok:
+        successes += 1
+        result["last_success_at"] = now
+        result["consecutive_failures"] = 0
+    else:
+        failures += 1
+        result["last_failure_at"] = now
+        result["consecutive_failures"] = parse_int(base.get("consecutive_failures")) + 1
+    result["probe_successes"] = successes
+    result["probe_failures"] = failures
+    return result
+
 def enrich_exit_ip(ip: str) -> dict[str, Any]:
     info = {
         "ip": ip,
@@ -447,7 +619,7 @@ def enrich_exit_ip(ip: str) -> dict[str, Any]:
     if ip:
         vpn_utils.enrich_ip_info([info])
     info["ip_type"] = (info.get("ip_type") or "normal").lower()
-    return info
+    return apply_purity_score(info)
 
 def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     ip = row.get("IP", "")
@@ -461,6 +633,7 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     return {
         "id": node_id,
         "source": "vpngate",
+        "upstream_source": "VPNGate",
         "country": country_zh,
         "country_short": country_short,
         "host_name": row.get("HostName", ""),
@@ -481,10 +654,20 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
         "proto": proto,
         "remote_host": remote_host,
         "remote_port": remote_port,
+        "exit_ip": "",
         "fetched_at": time.time(),
         "probe_status": "not_checked",
         "probe_message": "",
         "probed_at": 0,
+        "last_probe_at": 0,
+        "probe_successes": 0,
+        "probe_failures": 0,
+        "consecutive_failures": 0,
+        "purity_score": 0,
+        "purity_status": "unknown",
+        "purity_reasons": [],
+        "first_seen_at": time.time(),
+        "last_seen_at": time.time(),
     }
 
 def hard_candidate_reject_reason(node: dict[str, Any]) -> str:
@@ -645,7 +828,7 @@ def publicvpnlist_same_origin(url: str) -> bool:
     candidate_port = candidate.port or (443 if candidate.scheme == "https" else 80)
     return candidate_port == base_port
 
-def validate_publicvpnlist_profile(profile_bytes: bytes, expected_hash: str = "") -> str:
+def validate_openvpn_profile(profile_bytes: bytes, expected_hash: str = "") -> str:
     if len(profile_bytes) > PUBLICVPNLIST_MAX_CONFIG_BYTES:
         raise RuntimeError(
             f"PublicVPNList profile is too large: {len(profile_bytes)} bytes"
@@ -722,13 +905,10 @@ def download_publicvpnlist_config(entry_id: str, expected_hash: str = "") -> str
         if not publicvpnlist_same_origin(final_url):
             raise RuntimeError(f"PublicVPNList profile redirected off-site: {final_url}")
         profile_bytes = response.read(PUBLICVPNLIST_MAX_CONFIG_BYTES + 1)
-    return validate_publicvpnlist_profile(profile_bytes, expected_hash)
+    return validate_openvpn_profile(profile_bytes, expected_hash)
 
 def publicvpnlist_endpoint_key(entry: dict[str, Any]) -> str:
-    ip = str(entry.get("ip") or entry.get("host") or "").strip()
-    port = parse_int(entry.get("port") or entry.get("remote_port"))
-    proto = str(entry.get("proto") or entry.get("transport") or "").strip().lower()
-    return f"{ip}|{port}|{proto}"
+    return node_endpoint_key(entry)
 
 def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str = "") -> dict[str, Any]:
     ip = str(entry.get("ip") or entry.get("host") or "")
@@ -790,10 +970,20 @@ def publicvpnlist_entry_to_node(entry: dict[str, Any], config_text: str = "") ->
         "proto": proto,
         "remote_host": remote_host,
         "remote_port": remote_port,
+        "exit_ip": "",
         "fetched_at": time.time(),
         "probe_status": "not_checked",
         "probe_message": "",
         "probed_at": 0,
+        "last_probe_at": 0,
+        "probe_successes": 0,
+        "probe_failures": 0,
+        "consecutive_failures": 0,
+        "purity_score": 0,
+        "purity_status": "unknown",
+        "purity_reasons": [],
+        "first_seen_at": time.time(),
+        "last_seen_at": time.time(),
     }
 
 def fetch_publicvpnlist_dataset() -> list[dict[str, Any]]:
@@ -815,7 +1005,24 @@ def fetch_publicvpnlist_dataset() -> list[dict[str, Any]]:
 def ensure_node_config(node: dict[str, Any]) -> str:
     config_text = str(node.get("config_text") or "")
     if config_text.strip():
-        return config_text
+        return validate_openvpn_profile(
+            config_text.encode("utf-8"),
+            str(node.get("config_hash") or "").strip().lower(),
+        )
+
+    config_file = str(node.get("config_file") or "").strip()
+    if config_file:
+        config_path = Path(config_file)
+        try:
+            cached_config = config_path.read_text(encoding="utf-8", errors="replace")
+            expected_hash = str(node.get("config_hash") or "").strip().lower()
+            cached_hash = hashlib.sha256(cached_config.encode("utf-8")).hexdigest()
+            if cached_config.strip() and (not expected_hash or cached_hash == expected_hash):
+                cached_config = validate_openvpn_profile(cached_config.encode("utf-8"), expected_hash)
+                node["config_text"] = cached_config
+                return cached_config
+        except OSError:
+            pass
 
     if str(node.get("source") or "").lower() != "publicvpnlist":
         raise RuntimeError(f"Node {node.get('id', '')} has no OpenVPN configuration")
@@ -851,7 +1058,6 @@ def ensure_node_config(node: dict[str, Any]) -> str:
             f"PublicVPNList profile protocol mismatch: expected {expected_proto}, got {proto}"
         )
 
-    config_file = str(node.get("config_file") or "").strip()
     if not config_file:
         raise RuntimeError(f"Node {node.get('id', '')} has no config path")
     config_path = Path(config_file)
@@ -1022,7 +1228,12 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
                 encoded = row.get("OpenVPN_ConfigData_Base64", "")
                 if not encoded:
                     continue
-                config_text = decode_config(encoded)
+                try:
+                    config_text = validate_openvpn_profile(decode_config(encoded).encode("utf-8"))
+                except Exception as exc:
+                    rejected["unsafe_config"] = rejected.get("unsafe_config", 0) + 1
+                    print(f"[vpngate] rejected unsafe profile {ip}: {exc}", flush=True)
+                    continue
                 node = row_to_node(row, config_text)
                 endpoint_key = publicvpnlist_endpoint_key(node)
                 if not endpoint_key or endpoint_key in seen_endpoints:
@@ -1060,6 +1271,30 @@ def fetch_candidates(country_filter: str | None = None) -> list[dict[str, Any]]:
 
 def cached_nodes() -> list[dict[str, Any]]:
     return read_json(NODES_FILE, [])
+
+def source_stats(nodes: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    stats: dict[str, dict[str, int]] = {}
+    for node in nodes:
+        source = node_source_name(node)
+        entry = stats.setdefault(
+            source,
+            {"total": 0, "available": 0, "high_purity": 0, "unavailable": 0},
+        )
+        entry["total"] += 1
+        if node.get("probe_status") == "available":
+            entry["available"] += 1
+        if node_quality_allowed(node):
+            entry["high_purity"] += 1
+        if node.get("probe_status") == "unavailable":
+            entry["unavailable"] += 1
+    return stats
+
+def source_priority(node: dict[str, Any]) -> int:
+    source = node_source_name(node).casefold()
+    try:
+        return SOURCE_PROBE_ORDER.index(source)
+    except ValueError:
+        return len(SOURCE_PROBE_ORDER)
 
 _openvpn_version = None
 
@@ -1279,25 +1514,10 @@ def cleanup_policy_routing() -> None:
 def stop_active_openvpn() -> None:
     global active_openvpn_process, active_openvpn_node_id
     cleanup_policy_routing()
-    config_to_delete = None
-    if active_openvpn_node_id:
-        nodes = read_json(NODES_FILE, [])
-        node = next((item for item in nodes if item.get("id") == active_openvpn_node_id), None)
-        if node:
-            config_to_delete = node.get("config_file")
-            
     stop_process(active_openvpn_process)
     active_openvpn_process = None
     active_openvpn_node_id = ""
     kill_existing_openvpn_processes()
-    
-    if config_to_delete:
-        try:
-            path = Path(config_to_delete)
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
 
 def active_openvpn_running() -> bool:
     return active_openvpn_process is not None and active_openvpn_process.poll() is None
@@ -1306,7 +1526,10 @@ def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     available_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "available" or n.get("active")],
         key=lambda n: (
-            0 if (n.get("ip_type") or "").lower() in ("residential", "mobile") else 1,
+            0 if n.get("active") else 1,
+            0 if node_quality_allowed(n) else 1,
+            -parse_int(n.get("purity_score")),
+            source_priority(n),
             parse_int(n.get("sessions")),
             parse_int(n.get("latency_ms")) or 999999,
             -parse_int(n.get("speed")),
@@ -1315,7 +1538,7 @@ def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     untested_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "not_checked" and not n.get("active")],
-        key=clean_node_sort_key
+        key=lambda n: (source_priority(n), clean_node_sort_key(n))
     )
     unavailable_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "unavailable" and not n.get("active")],
@@ -1328,11 +1551,11 @@ test_indexes_lock = threading.Lock()
 
 def get_free_test_index() -> int:
     with test_indexes_lock:
-        for idx in range(2, 100):
+        for idx in range(1, 100):
             if idx not in active_test_indexes:
                 active_test_indexes.add(idx)
                 return idx
-        return 99
+        raise RuntimeError("No free temporary TUN interface is available")
 
 def release_test_index(idx: int) -> None:
     with test_indexes_lock:
@@ -1346,14 +1569,12 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
             raise ValueError(f"Node not found: {node_id}")
         node = dict(stored_node)
 
-    ensure_node_config(node)
-    config_file = str(node["config_file"])
-    config_text = node.get("config_text") or ""
+    config_text = ensure_node_config(node)
     h = str(node.get("remote_host") or node.get("ip"))
     p = parse_int(node.get("remote_port"))
     fallback_ping = parse_int(node.get("ping"))
 
-    temp_path = Path(config_file)
+    temp_path = CONFIG_DIR / f".probe_{safe_name(node_id)}_{uuid.uuid4().hex}.ovpn"
     try:
         CONFIG_DIR.mkdir(exist_ok=True, parents=True)
         write_private_config(temp_path, config_text)
@@ -1370,7 +1591,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
     idx = get_free_test_index()
     try:
         try:
-            ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}")
+            ok, message, _ = run_openvpn_until_ready(str(temp_path), keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}")
         finally:
             try:
                 if temp_path.exists():
@@ -1392,27 +1613,23 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         "ip_type": "",
         "quality": "",
     }
+    enrichment = None
     if ok:
         vpn_utils.enrich_ip_info([temp_node])
-        if not exit_type_allowed(temp_node.get("ip_type")):
-            ok = False
-            message = f"Rejected by exit IP policy: {temp_node.get('ip_type') or 'normal'}"
+        enrichment = temp_node
+    result_fields = finalize_probe_result(
+        node,
+        ok,
+        message,
+        latency,
+        enrichment,
+    )
 
     with lock:
         nodes = read_json(NODES_FILE, [])
         node = next((item for item in nodes if item.get("id") == node_id), None)
         if node:
-            node["latency_ms"] = latency
-            node["probe_status"] = "available" if ok else "unavailable"
-            node["probe_message"] = message
-            node["probed_at"] = time.time()
-            if ok:
-                node["owner"] = temp_node["owner"]
-                node["asn"] = temp_node["asn"]
-                node["as_name"] = temp_node["as_name"]
-                node["location"] = temp_node["location"]
-                node["ip_type"] = temp_node["ip_type"]
-                node["quality"] = temp_node["quality"]
+            node.update(result_fields)
             
             sorted_nodes = sort_all_nodes(nodes)
             write_json(NODES_FILE, sorted_nodes)
@@ -1427,19 +1644,17 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         to_test = [n for n in nodes if n.get("id") in node_ids]
         if MAX_TEST_NODES > 0:
             to_test = to_test[:MAX_TEST_NODES]
+    node_by_id = {str(node.get("id")): node for node in to_test}
         
-    def test_worker(args: tuple[int, dict[str, Any]]) -> dict[str, Any]:
-        idx, n_info = args
+    def test_worker(n_info: dict[str, Any]) -> dict[str, Any]:
         n_info = dict(n_info)
         node_id = n_info["id"]
-        ensure_node_config(n_info)
-        config_file = n_info["config_file"]
-        config_text = n_info.get("config_text") or ""
+        config_text = ensure_node_config(n_info)
         h = str(n_info.get("remote_host") or n_info.get("ip"))
         p = parse_int(n_info.get("remote_port"))
         fallback_ping = parse_int(n_info.get("ping"))
         
-        temp_path = Path(config_file)
+        temp_path = CONFIG_DIR / f".probe_{safe_name(node_id)}_{uuid.uuid4().hex}.ovpn"
         try:
             CONFIG_DIR.mkdir(exist_ok=True, parents=True)
             write_private_config(temp_path, config_text)
@@ -1452,29 +1667,24 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
             raise RuntimeError(f"Failed to write temp config file: {e}")
             
         latency = vpn_utils.ping_latency_ms(h, p, fallback_ping)
-        dev_name = f"tun{idx + 1}"
+        idx = get_free_test_index()
         try:
-            ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
+            ok, message, _ = run_openvpn_until_ready(
+                str(temp_path),
+                keep_alive=False,
+                route_nopull=True,
+                timeout=12,
+                dev=f"tun{idx}",
+            )
         finally:
+            release_test_index(idx)
             try:
                 if temp_path.exists():
                     temp_path.unlink()
             except Exception:
                 pass
             
-        temp_node = {
-            "id": node_id,
-            "latency_ms": latency,
-            "probe_status": "available" if ok else "unavailable",
-            "probe_message": message,
-            "probed_at": time.time(),
-            "owner": "",
-            "asn": "",
-            "as_name": "",
-            "location": "",
-            "ip_type": "",
-            "quality": "",
-        }
+        enrichment = None
         if ok:
             ip_to_enrich = {
                 "ip": n_info.get("ip"),
@@ -1487,28 +1697,25 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
                 "quality": "",
             }
             vpn_utils.enrich_ip_info([ip_to_enrich])
-            temp_node.update(ip_to_enrich)
-            if not exit_type_allowed(temp_node.get("ip_type")):
-                temp_node["probe_status"] = "unavailable"
-                temp_node["probe_message"] = f"Rejected by exit IP policy: {temp_node.get('ip_type') or 'normal'}"
-        return temp_node
+            enrichment = ip_to_enrich
+        return finalize_probe_result(n_info, ok, message, latency, enrichment)
 
     updated_nodes_map = {}
     worker_count = min(len(to_test), max(1, MAX_TEST_WORKERS))
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count or 1) as executor:
-        futures = {executor.submit(test_worker, (idx, n)): n["id"] for idx, n in enumerate(to_test)}
+        futures = {executor.submit(test_worker, n): n["id"] for n in to_test}
         for future in concurrent.futures.as_completed(futures):
             nid = futures[future]
             try:
                 res = future.result()
                 updated_nodes_map[nid] = res
             except Exception as e:
-                updated_nodes_map[nid] = {
-                    "id": nid,
-                    "probe_status": "unavailable",
-                    "probe_message": f"Test exception: {e}",
-                    "latency_ms": 0
-                }
+                updated_nodes_map[nid] = finalize_probe_result(
+                    node_by_id.get(nid, {"id": nid}),
+                    False,
+                    f"Test exception: {e}",
+                    0,
+                )
                 
     with lock:
         current_nodes = read_json(NODES_FILE, [])
@@ -1534,11 +1741,12 @@ def auto_switch_node(attempt: int = 0) -> None:
             n for n in nodes 
             if n.get("probe_status") == "available" 
             and not n.get("active")
-            and exit_type_allowed(n.get("ip_type"))
+            and node_quality_allowed(n)
         ]
         candidates.sort(
             key=lambda n: (
-                0 if (n.get("ip_type") or "").lower() in ("residential", "mobile") else 1,
+                -parse_int(n.get("purity_score")),
+                source_priority(n),
                 parse_int(n.get("sessions")),
                 parse_int(n.get("latency_ms")) or 999999,
                 -parse_int(n.get("speed")),
@@ -1597,7 +1805,7 @@ def connect_node(node_id: str) -> str:
         node = dict(stored_node)
         
         set_state(active_node_latency="获取配置", last_check_message="正在准备并校验 OpenVPN 节点配置...")
-        ensure_node_config(node)
+        config_text = ensure_node_config(node)
 
         set_state(active_node_latency="清理连接", last_check_message="正在关闭与清理旧的 VPN 连接及网卡...")
         stop_active_openvpn()
@@ -1606,18 +1814,13 @@ def connect_node(node_id: str) -> str:
         config_path = Path(node["config_file"])
         try:
             CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-            write_private_config(config_path, node.get("config_text") or "")
+            write_private_config(config_path, config_text)
         except Exception as e:
             raise RuntimeError(f"Failed to write configuration: {e}")
 
         set_state(active_node_latency="启动核心", last_check_message="正在启动 OpenVPN Core 核心服务并建立连接...")
         ok, message, process = run_openvpn_until_ready(str(node["config_file"]), keep_alive=True, route_nopull=True)
         if not ok or process is None:
-            try:
-                if config_path.exists():
-                    config_path.unlink()
-            except Exception:
-                pass
             node["probe_status"] = "unavailable"
             node["probe_message"] = message
             for item in nodes:
@@ -1657,11 +1860,31 @@ def connect_node(node_id: str) -> str:
         set_state(last_check_message="Testing proxy egress IP and policy...")
         proxy_res = check_proxy_health()
         if proxy_res["ok"]:
+            for item in nodes:
+                if item.get("id") == node_id:
+                    item.update(
+                        {
+                            "owner": proxy_res.get("owner", item.get("owner", "")),
+                            "asn": proxy_res.get("asn", item.get("asn", "")),
+                            "as_name": proxy_res.get("as_name", item.get("as_name", "")),
+                            "quality": proxy_res.get("quality", item.get("quality", "")),
+                            "exit_ip": proxy_res.get("ip", item.get("exit_ip", "")),
+                            "location": proxy_res.get("location", item.get("location", "")),
+                            "ip_type": proxy_res.get("ip_type", item.get("ip_type", "")),
+                            "purity_score": proxy_res.get("purity_score", item.get("purity_score", 0)),
+                            "purity_status": proxy_res.get("purity_status", item.get("purity_status", "unknown")),
+                            "purity_reasons": proxy_res.get("purity_reasons", item.get("purity_reasons", [])),
+                            "probe_status": "available",
+                        }
+                    )
+            write_json(NODES_FILE, nodes)
             set_state(
                 proxy_ok=True,
                 proxy_ip=proxy_res["ip"],
                 proxy_latency_ms=proxy_res["latency_ms"],
                 proxy_ip_type=proxy_res.get("ip_type", "normal"),
+                proxy_purity_score=proxy_res.get("purity_score", 0),
+                proxy_purity_status=proxy_res.get("purity_status", "unknown"),
                 proxy_location=proxy_res.get("location", ""),
                 proxy_owner=proxy_res.get("owner", ""),
                 proxy_error="",
@@ -1681,6 +1904,8 @@ def connect_node(node_id: str) -> str:
                 proxy_ip=proxy_res.get("ip", "-"),
                 proxy_latency_ms=0,
                 proxy_ip_type=proxy_res.get("ip_type", ""),
+                proxy_purity_score=proxy_res.get("purity_score", 0),
+                proxy_purity_status=proxy_res.get("purity_status", "unknown"),
                 proxy_location=proxy_res.get("location", ""),
                 proxy_owner=proxy_res.get("owner", ""),
                 proxy_error=error_msg,
@@ -1697,17 +1922,40 @@ def connect_node(node_id: str) -> str:
         with lock:
             is_connecting = False
 
+def probe_schedule_key(node: dict[str, Any], now: float | None = None) -> tuple[int, float, tuple[int, int, int, int]]:
+    current_time = now if now is not None else time.time()
+    status = str(node.get("probe_status") or "not_checked")
+    try:
+        last_probe = float(node.get("last_probe_at") or node.get("probed_at") or 0)
+    except (TypeError, ValueError):
+        last_probe = 0
+    age = current_time - last_probe if last_probe > 0 else float("inf")
+    if status == "not_checked" or last_probe <= 0:
+        rank = 0
+    elif status == "unavailable" and age >= INVALID_BACKOFF_SECONDS:
+        rank = 1
+    elif status == "available" and age >= PROBE_RECHECK_INTERVAL_SECONDS:
+        rank = 2
+    else:
+        rank = 3
+    return rank, last_probe, clean_node_sort_key(node)
+
 def select_nodes_for_probe(nodes: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     pool = [node for node in nodes if not node.get("active")]
-    if limit <= 0 or len(pool) <= limit:
-        return pool[:limit] if limit > 0 else pool
+    if not pool:
+        return []
+    if limit <= 0:
+        limit = len(pool)
 
     buckets: dict[str, list[dict[str, Any]]] = {}
     for node in pool:
-        source = str(node.get("source") or "other").lower()
+        source = node_source_name(node).casefold()
         buckets.setdefault(source, []).append(node)
+    now = time.time()
+    for bucket in buckets.values():
+        bucket.sort(key=lambda node: probe_schedule_key(node, now))
 
-    source_order = [source for source in ("publicvpnlist", "vpngate") if source in buckets]
+    source_order = [source for source in SOURCE_PROBE_ORDER if source in buckets]
     source_order.extend(source for source in buckets if source not in source_order)
     selected: list[dict[str, Any]] = []
     positions = {source: 0 for source in source_order}
@@ -1727,7 +1975,32 @@ def select_nodes_for_probe(nodes: list[dict[str, Any]], limit: int) -> list[dict
             break
     return selected
 
-def maintain_valid_nodes(force: bool = False, country_filter: str | None = None) -> str:
+def merge_node_history(candidate: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    now = time.time()
+    merged = dict(candidate)
+    if not previous:
+        merged.setdefault("first_seen_at", now)
+        merged["last_seen_at"] = now
+        return merged
+
+    previous_hash = str(previous.get("config_hash") or "").strip()
+    candidate_hash = str(candidate.get("config_hash") or "").strip()
+    profile_changed = bool(previous_hash and candidate_hash and previous_hash != candidate_hash)
+    if not profile_changed:
+        for key in (
+            "probe_status", "probe_message", "latency_ms", "probed_at", "last_probe_at",
+            "probe_successes", "probe_failures", "consecutive_failures",
+            "last_success_at", "last_failure_at", "owner", "asn", "as_name",
+            "location", "ip_type", "quality", "purity_score", "purity_status", "exit_ip",
+            "purity_reasons", "config_text",
+        ):
+            if key in previous:
+                merged[key] = previous.get(key)
+    merged["first_seen_at"] = previous.get("first_seen_at") or now
+    merged["last_seen_at"] = now
+    return merged
+
+def _maintain_valid_nodes(force: bool = False, country_filter: str | None = None) -> str:
     global active_openvpn_process, active_openvpn_node_id
     ensure_dirs()
     if country_filter:
@@ -1759,22 +2032,35 @@ def maintain_valid_nodes(force: bool = False, country_filter: str | None = None)
         return "没有拉取到新节点"
 
     with lock:
+        current_nodes = read_json(NODES_FILE, [])
+        history_by_endpoint = {
+            key: node
+            for node in current_nodes
+            if (key := node_endpoint_key(node))
+        }
         active_node = None
         if active_openvpn_node_id:
-            current_nodes = read_json(NODES_FILE, [])
             active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
             
         merged: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+        seen_endpoints: set[str] = set()
         
         if active_node:
             merged.append(active_node)
             seen_ids.add(active_node["id"])
+            if endpoint := node_endpoint_key(active_node):
+                seen_endpoints.add(endpoint)
             
         for cand in candidates:
-            if cand["id"] not in seen_ids:
-                merged.append(cand)
-                seen_ids.add(cand["id"])
+            endpoint = node_endpoint_key(cand)
+            if cand["id"] in seen_ids or (endpoint and endpoint in seen_endpoints):
+                continue
+            cand = merge_node_history(cand, history_by_endpoint.get(endpoint))
+            merged.append(cand)
+            seen_ids.add(cand["id"])
+            if endpoint:
+                seen_endpoints.add(endpoint)
                 
         if MAX_NODE_LIST > 0 and len(merged) > MAX_NODE_LIST:
             merged = merged[:MAX_NODE_LIST]
@@ -1786,36 +2072,51 @@ def maintain_valid_nodes(force: bool = False, country_filter: str | None = None)
                     write_private_config(config_path, n["config_text"])
                 except Exception:
                     pass
+            n.pop("config_text", None)
                     
         write_json(NODES_FILE, merged)
 
-    # Test the first 10 non-active nodes from the new list
+    # Probe a bounded, source-balanced slice on each maintenance cycle.
     with lock:
         current_nodes = read_json(NODES_FILE, [])
-        to_test = select_nodes_for_probe(current_nodes, 10)
+        to_test = select_nodes_for_probe(current_nodes, MAINTENANCE_PROBE_NODES)
         to_test_ids = [n["id"] for n in to_test]
         
-    print(f"[维护线程] 正在检测新获取列表的前 10 个节点: {to_test_ids}", flush=True)
+    print(f"[维护线程] 正在检测来源均衡的 {len(to_test_ids)} 个节点: {to_test_ids}", flush=True)
     test_multiple_nodes(to_test_ids)
     
     with lock:
         merged = read_json(NODES_FILE, [])
         if not active_openvpn_running():
-            available_candidates = [n for n in merged if n.get("probe_status") == "available"]
+            available_candidates = [n for n in merged if node_quality_allowed(n)]
             if available_candidates:
                 auto_switch_node()
 
-    valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
-    message = f"Fetched {len(candidates)} nodes. Tested first 10 nodes."
+    available_nodes_count = len(
+        [n for n in merged if n.get("probe_status") == "available"]
+    )
+    valid_nodes_count = len([n for n in merged if node_quality_allowed(n)])
+    message = f"Fetched {len(candidates)} nodes. Tested {len(to_test_ids)} source-balanced nodes."
     if country_filter:
-        message = f"Fetched {len(candidates)} nodes for {country_filter}. Tested first 10 nodes."
+        message = f"Fetched {len(candidates)} nodes for {country_filter}. Tested {len(to_test_ids)} source-balanced nodes."
     set_state(
         last_check_at=time.time(),
         last_check_message=message,
         active_openvpn_node_id=active_openvpn_node_id,
         valid_nodes=valid_nodes_count,
+        available_nodes=available_nodes_count,
     )
     return message
+
+def maintain_valid_nodes(force: bool = False, country_filter: str | None = None) -> str:
+    if is_connecting:
+        return "节点连接正在进行，跳过本轮维护"
+    if not maintenance_lock.acquire(blocking=False):
+        return "节点维护任务已在运行"
+    try:
+        return _maintain_valid_nodes(force=force, country_filter=country_filter)
+    finally:
+        maintenance_lock.release()
 
 
 def collector_loop() -> None:
@@ -2787,7 +3088,7 @@ INDEX_HTML = r"""<!doctype html>
             <th>物理位置</th>
             <th style="width: 100px;">ASN</th>
             <th>运营主体 / ISP</th>
-            <th style="width: 110px;">网络质量</th>
+            <th style="width: 150px;">网络质量 / IP 纯度</th>
             <th style="width: 110px;">IP 类型</th>
             <th style="width: 160px;">操作</th>
           </tr>
@@ -2889,6 +3190,12 @@ function speed(v){return v?`${(v*8/1000/1000).toFixed(1)} Mbps`:"-"}
 const translateQuality = q => {
   const dict = {"normal": "普通", "proxy": "代理", "datacenter": "数据中心", "mobile": "移动端"};
   return dict[q] || q || "-";
+};
+
+const displayQuality = n => {
+  const score = Number(n && n.purity_score || 0);
+  const purity = score > 0 ? `纯度 ${score}` : "纯度未知";
+  return `${translateQuality(n && n.quality)} / ${purity}`;
 };
 
 const translateIpType = t => {
@@ -3043,7 +3350,7 @@ function getFilteredNodes() {
     }
     const searchStr = [
       n.country, n.country_short, n.ip, n.remote_host, n.proto,
-      displaySource(n), translateQuality(n.quality), translateIpType(n.ip_type), n.location, n.owner, n.as_name
+      displaySource(n), displayQuality(n), translateIpType(n.ip_type), n.purity_status, n.location, n.owner, n.as_name
     ].join(" ").toLowerCase();
     return searchStr.includes(q);
   });
@@ -3221,7 +3528,7 @@ function render(){
         <td>${esc(displayLocation)}</td>
         <td class="mono" style="font-size:12px; color:var(--text-secondary);">${esc(n.asn||"-")}</td>
         <td>${esc(n.owner||n.as_name||"-")}</td>
-        <td>${esc(translateQuality(n.quality))}</td>
+        <td>${esc(displayQuality(n))}</td>
         <td>${esc(translateIpType(n.ip_type))}</td>
         <td>
           <div class="table-actions">
@@ -3654,20 +3961,33 @@ def check_proxy_health() -> dict[str, Any]:
             ip, latency = result
             exit_info = enrich_exit_ip(ip)
             ip_type = exit_info.get("ip_type", "normal")
-            if not exit_type_allowed(ip_type):
+            if not node_quality_allowed(exit_info):
+                reasons = ", ".join(exit_info.get("purity_reasons") or []) or "quality_policy"
                 return {
                     "ok": False,
                     "ip": ip,
                     "ip_type": ip_type,
+                    "asn": exit_info.get("asn", ""),
+                    "as_name": exit_info.get("as_name", ""),
+                    "quality": exit_info.get("quality", ""),
+                    "purity_score": exit_info.get("purity_score", 0),
+                    "purity_status": exit_info.get("purity_status", "unknown"),
+                    "purity_reasons": exit_info.get("purity_reasons", []),
                     "location": exit_info.get("location", ""),
                     "owner": exit_info.get("owner", ""),
-                    "error": f"Exit IP type rejected by policy: {ip_type}. Accepted: {','.join(sorted(ACCEPTED_EXIT_IP_TYPES))}",
+                    "error": f"Exit IP quality rejected: {reasons}. Minimum purity score: {MIN_PURITY_SCORE}",
                 }
             return {
                 "ok": True,
                 "ip": ip,
                 "latency_ms": latency,
                 "ip_type": ip_type,
+                "asn": exit_info.get("asn", ""),
+                "as_name": exit_info.get("as_name", ""),
+                "quality": exit_info.get("quality", ""),
+                "purity_score": exit_info.get("purity_score", 0),
+                "purity_status": exit_info.get("purity_status", "unknown"),
+                "purity_reasons": exit_info.get("purity_reasons", []),
                 "location": exit_info.get("location", ""),
                 "owner": exit_info.get("owner", ""),
             }
@@ -3690,6 +4010,8 @@ def background_proxy_checker() -> None:
                     proxy_ip=res["ip"],
                     proxy_latency_ms=res["latency_ms"],
                     proxy_ip_type=res.get("ip_type", "normal"),
+                    proxy_purity_score=res.get("purity_score", 0),
+                    proxy_purity_status=res.get("purity_status", "unknown"),
                     proxy_location=res.get("location", ""),
                     proxy_owner=res.get("owner", ""),
                     proxy_error=""
@@ -3705,6 +4027,8 @@ def background_proxy_checker() -> None:
                     proxy_ip=res.get("ip", "-"),
                     proxy_latency_ms=0,
                     proxy_ip_type=res.get("ip_type", ""),
+                    proxy_purity_score=res.get("purity_score", 0),
+                    proxy_purity_status=res.get("purity_status", "unknown"),
                     proxy_location=res.get("location", ""),
                     proxy_owner=res.get("owner", ""),
                     proxy_error=error_msg
@@ -3955,6 +4279,7 @@ class Handler(BaseHTTPRequestHandler):
                 with lock:
                     DATA_DIR.mkdir(exist_ok=True, parents=True)
                     auth_file.write_text(json.dumps(ui_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+                    auth_file.chmod(0o600)
                 
                 self.send_json({"ok": True, "message": "配置更新成功，系统将在 2 秒内重启..."})
                 
@@ -4044,6 +4369,8 @@ class Handler(BaseHTTPRequestHandler):
                         proxy_ip=result["ip"],
                         proxy_latency_ms=result["latency_ms"],
                         proxy_ip_type=result.get("ip_type", "normal"),
+                        proxy_purity_score=result.get("purity_score", 0),
+                        proxy_purity_status=result.get("purity_status", "unknown"),
                         proxy_location=result.get("location", ""),
                         proxy_owner=result.get("owner", ""),
                         proxy_error=""
@@ -4054,6 +4381,8 @@ class Handler(BaseHTTPRequestHandler):
                         proxy_ip=result.get("ip", "-"),
                         proxy_latency_ms=0,
                         proxy_ip_type=result.get("ip_type", ""),
+                        proxy_purity_score=result.get("purity_score", 0),
+                        proxy_purity_status=result.get("purity_status", "unknown"),
                         proxy_location=result.get("location", ""),
                         proxy_owner=result.get("owner", ""),
                         proxy_error=result.get("error", "Unknown error")
@@ -4100,11 +4429,15 @@ def main() -> None:
             "max_node_list": MAX_NODE_LIST,
             "max_test_nodes": MAX_TEST_NODES,
             "max_test_workers": MAX_TEST_WORKERS,
+            "maintenance_probe_nodes": MAINTENANCE_PROBE_NODES,
             "target_valid_nodes": TARGET_VALID_NODES,
             "fetch_interval_seconds": FETCH_INTERVAL_SECONDS,
             "check_interval_seconds": CHECK_INTERVAL_SECONDS,
+            "probe_recheck_interval_seconds": PROBE_RECHECK_INTERVAL_SECONDS,
             "local_proxy": f"http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}",
             "accepted_exit_ip_types": sorted(ACCEPTED_EXIT_IP_TYPES),
+            "min_purity_score": MIN_PURITY_SCORE,
+            "source_probe_order": list(SOURCE_PROBE_ORDER),
             "max_node_sessions": MAX_NODE_SESSIONS,
             "max_node_ping": MAX_NODE_PING,
             "min_node_speed": MIN_NODE_SPEED,
@@ -4113,6 +4446,8 @@ def main() -> None:
             "last_fetch_status": "starting",
             "last_check_message": "service starting",
             "blacklisted_nodes": 0,
+            "valid_nodes": 0,
+            "available_nodes": 0,
         },
     )
     threading.Thread(target=proxy_server.start_proxy_server, args=(LOCAL_PROXY_HOST, LOCAL_PROXY_PORT), daemon=True).start()
